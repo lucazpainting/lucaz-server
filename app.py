@@ -233,14 +233,21 @@ def generate_proposal(E):
                 for r in para.runs[1:]: r.text = ''
                 break
 
-    # 9. Duration
+    # 9. Duration — handle split runs "(X" + "–" + "X)" across multiple runs
     duration = E.get('duration', '')
     if duration:
         for para in doc.paragraphs:
-            if '(X–X)' in para.text:
-                for run in para.runs:
-                    if '(X–X)' in run.text:
-                        run.text = run.text.replace('(X–X)', duration)
+            if 'anticipated to take approximately' in para.text and '(X' in para.text:
+                # Rebuild the full paragraph text replacing placeholder
+                full_text = para.text
+                if '(X' in full_text and 'X)' in full_text:
+                    new_text = full_text.replace('(X–X)', duration).replace('(X-X)', duration)
+                    # Set first run to full text, clear the rest
+                    if para.runs:
+                        para.runs[0].text = new_text
+                        for run in para.runs[1:]:
+                            run.text = ''
+                break
 
     # 9b. Cost table — update with real numbers from dashboard
     cost_map = {
@@ -259,6 +266,60 @@ def generate_proposal(E):
                 if val and key in cell0:
                     set_cell_text(row.cells[1], val)
                     break
+
+    # 9c. Photos — embed images into photo grid cells
+    photos = E.get('photos', {})
+    if photos:
+        import base64
+        from docx.shared import Inches
+        from docx.oxml import OxmlElement as OE
+
+        # Map label text in cell to photo key
+        label_to_key = {
+            'Back': 'Back', 'Left': 'Left', 'Garage': 'add1',
+            'Front': 'Front', 'Right': 'Right',
+            'Additional 1': 'add1', 'Additional 2': 'add2', 'Additional 3': 'add3'
+        }
+        # Find photo tables (tables 8 and 9 in template)
+        photo_tables = []
+        for tbl in doc.tables:
+            for row in tbl.rows:
+                for cell in row.cells:
+                    if '[ Insert Photo Here ]' in cell.text:
+                        photo_tables.append(tbl)
+                        break
+                else: continue
+                break
+
+        for tbl in photo_tables:
+            for row in tbl.rows:
+                for cell in row.cells:
+                    if '[ Insert Photo Here ]' not in cell.text:
+                        continue
+                    # Find label (second paragraph in cell)
+                    label = ''
+                    for para in cell.paragraphs:
+                        if '[ Insert Photo Here ]' not in para.text and para.text.strip():
+                            label = para.text.strip()
+                            break
+                    photo_key = label_to_key.get(label)
+                    photo_data = photos.get(photo_key) if photo_key else None
+                    if photo_data and photo_data.startswith('data:image'):
+                        try:
+                            # Decode base64
+                            header, b64 = photo_data.split(',', 1)
+                            img_bytes = base64.b64decode(b64)
+                            img_buf = io.BytesIO(img_bytes)
+                            # Clear placeholder text from first para
+                            if cell.paragraphs:
+                                first_para = cell.paragraphs[0]
+                                for run in first_para.runs:
+                                    run.text = ''
+                                # Add image run to first para
+                                run = first_para.add_run()
+                                run.add_picture(img_buf, width=Inches(2.0))
+                        except Exception:
+                            pass  # Keep placeholder if image fails
 
     # 10. Porta Potty
     if not E.get('portaPotty', False):
