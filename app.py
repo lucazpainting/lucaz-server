@@ -3,7 +3,7 @@ from flask_cors import CORS
 from docx import Document
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
-import copy, io, os, json
+import copy, io, os
 
 app = Flask(__name__)
 CORS(app)
@@ -22,7 +22,7 @@ def set_cell_text(cell, new_text, bold=None, italic=None):
         if italic is not None: first.italic = italic
         return
 
-def set_row_cell_text(row_el, col_idx, text, bold=None, italic=False):
+def set_row_cell_text(row_el, col_idx, text, bold=None):
     cells = row_el.findall(qn('w:tc'))
     if col_idx >= len(cells): return
     cell = cells[col_idx]
@@ -41,111 +41,188 @@ def set_row_cell_text(row_el, col_idx, text, bold=None, italic=False):
                 if bold is not None:
                     b = rpr.find(qn('w:b'))
                     if bold and b is None:
-                        b = OxmlElement('w:b')
-                        rpr.insert(0, b)
+                        b = OxmlElement('w:b'); rpr.insert(0, b)
                     elif not bold and b is not None:
                         rpr.remove(b)
                 i_el = rpr.find(qn('w:i'))
-                if i_el is not None:
-                    rpr.remove(i_el)
+                if i_el is not None: rpr.remove(i_el)
             for extra_r in runs[1:]:
                 t2 = extra_r.find(qn('w:t'))
                 if t2 is not None: t2.text = ''
             break
 
+def get_para_text(el, doc):
+    try:
+        from docx.text.paragraph import Paragraph
+        return Paragraph(el, doc).text.strip()
+    except:
+        return ''
+
+def get_table_first_cell(el, doc):
+    try:
+        from docx.table import Table
+        return Table(el, doc).rows[0].cells[0].text.strip()
+    except:
+        return ''
+
+def remove_side_block(doc, side_label):
+    search = side_label + ' of House'
+    body = doc.element.body
+    children = list(body)
+    for i, child in enumerate(children):
+        tag = child.tag.split('}')[-1]
+        if tag == 'p' and search in get_para_text(child, doc):
+            # Remove heading + next 3 elements (paint brand para, table, empty para)
+            to_remove = [child]
+            j = i + 1
+            while j < len(children) and len(to_remove) <= 3:
+                nc = children[j]
+                nc_tag = nc.tag.split('}')[-1]
+                nc_text = get_para_text(nc, doc) if nc_tag == 'p' else get_table_first_cell(nc, doc)
+                # Stop if we hit another major section
+                if nc_text and any(x in nc_text for x in ['of House','PROJECT PHOTOS','WARRANTY','PAYMENT','COST','NEXT','ESTIMATE','Inspection','Materials']):
+                    break
+                to_remove.append(nc)
+                j += 1
+            for el in to_remove:
+                try: body.remove(el)
+                except: pass
+            return
+
+def rebuild_paint_table(tbl, surfaces):
+    rows = list(tbl.rows)
+    for row in rows[1:]:
+        row._element.getparent().remove(row._element)
+    hdr_el = tbl.rows[0]._element
+    for idx, sf in enumerate(surfaces):
+        qty = sf.get('qty')
+        nm = f"{sf['name']} × {qty}" if qty and int(str(qty)) > 1 else sf['name']
+        new_row = copy.deepcopy(hdr_el)
+        fill = 'FFFFFF' if idx % 2 == 0 else 'FAF5F5'
+        for tc in new_row.findall(qn('w:tc')):
+            shd = tc.find(f'.//{qn("w:shd")}')
+            if shd is not None:
+                shd.set(qn('w:fill'), fill)
+                shd.set(qn('w:color'), 'auto')
+        tbl._element.append(new_row)
+        vals = [nm, sf.get('paint',''), sf.get('sheen',''), sf.get('color','TBD'), f"{sf.get('pc',2)} / {sf.get('prc',0)}"]
+        for ci, val in enumerate(vals):
+            set_row_cell_text(new_row, ci, val, bold=(ci == 0))
+
 def generate_proposal(E):
     doc = Document(TEMPLATE_PATH)
+    sides_data = E.get('sides', [])
+    active_labels = [s['label'] for s in sides_data]
+    all_sides = ['Front', 'Left', 'Right', 'Back']
 
     # 1. Proposal # / License / Date
     for para in doc.paragraphs:
         if 'Proposal #:' in para.text and 'License:' in para.text:
             for run in para.runs:
-                run.text = run.text.replace('0135', E['proposalNum'])
-                run.text = run.text.replace('05/14/2026', E['dateIssued'])
+                run.text = run.text.replace('0135', E.get('proposalNum', '____'))
+                run.text = run.text.replace('05/14/2026', E.get('dateIssued', ''))
             break
 
-    # 2. Client info table
+    # 2. Client info
     ct = doc.tables[0]
     addr = f"{E['client']['street']}, {E['client']['city']}, {E['client']['state']} {E['client']['zip']}"
-    set_cell_text(ct.rows[0].cells[1], E['subject'],              italic=True)
-    set_cell_text(ct.rows[1].cells[1], E['client']['name'],       italic=True)
-    set_cell_text(ct.rows[2].cells[1], addr,                      italic=True)
-    set_cell_text(ct.rows[3].cells[1], E['client']['phone'],      italic=True)
-    set_cell_text(ct.rows[4].cells[1], E['client']['email'],      italic=True)
+    set_cell_text(ct.rows[0].cells[1], E.get('subject',''), italic=True)
+    set_cell_text(ct.rows[1].cells[1], E['client']['name'], italic=True)
+    set_cell_text(ct.rows[2].cells[1], addr, italic=True)
+    set_cell_text(ct.rows[3].cells[1], E['client']['phone'], italic=True)
+    set_cell_text(ct.rows[4].cells[1], E['client']['email'], italic=True)
 
-    # 3. Power wash bullets (table 1)
+    # 3. Power wash bullets
     pw_cell = doc.tables[1].rows[0].cells[0]
-    bullet_paras = [p for p in pw_cell.paragraphs if p.text.strip() and 'Power Washing' not in p.text]
+    bps = [p for p in pw_cell.paragraphs if p.text.strip() and 'Power Washing' not in p.text]
     for i, item in enumerate(E.get('powerWash', [])):
-        if i < len(bullet_paras) and bullet_paras[i].runs:
-            for run in bullet_paras[i].runs: run.text = ''
-            bullet_paras[i].runs[0].text = item
+        if i < len(bps) and bps[i].runs:
+            for r in bps[i].runs: r.text = ''
+            bps[i].runs[0].text = item
 
-    # 4. Surface prep bullets (table 2)
+    # 4. Surface prep bullets
     sp_cell = doc.tables[2].rows[0].cells[0]
-    sp_paras = [p for p in sp_cell.paragraphs if p.text.strip() and 'Surface Preparation' not in p.text]
+    sps = [p for p in sp_cell.paragraphs if p.text.strip() and 'Surface Preparation' not in p.text]
     for i, item in enumerate(E.get('surfacePrep', [])):
-        if i < len(sp_paras) and sp_paras[i].runs:
-            for run in sp_paras[i].runs: run.text = ''
-            sp_paras[i].runs[0].text = item
+        if i < len(sps) and sps[i].runs:
+            for r in sps[i].runs: r.text = ''
+            sps[i].runs[0].text = item
 
-    # 5. Paint spec tables (tables 3-6) — one per side
-    side_tables = [doc.tables[3], doc.tables[4], doc.tables[5], doc.tables[6]]
-    for si, side in enumerate(E.get('sides', [])):
-        if si >= len(side_tables): break
-        tbl = side_tables[si]
-        # Remove all data rows (keep header row 0)
-        data_rows = list(tbl.rows)[1:]
-        for dr in data_rows:
-            dr._element.getparent().remove(dr._element)
-        # Add new rows cloned from header
-        hdr_el = tbl.rows[0]._element
-        for idx, sf in enumerate(side.get('surfaces', [])):
-            nm = f"{sf['name']} × {sf['qty']}" if sf.get('qty') and sf['qty'] > 1 else sf['name']
-            new_row = copy.deepcopy(hdr_el)
-            fill = 'FFFFFF' if idx % 2 == 0 else 'FAF5F5'
-            for tc in new_row.findall(qn('w:tc')):
-                shd = tc.find(f'.//{qn("w:shd")}')
-                if shd is not None:
-                    shd.set(qn('w:fill'), fill)
-                    shd.set(qn('w:color'), 'auto')
-            tbl._element.append(new_row)
-            vals = [nm, sf.get('paint',''), sf.get('sheen',''), sf.get('color',''), f"{sf.get('pc',2)} / {sf.get('prc',0)}"]
-            for ci, val in enumerate(vals):
-                set_row_cell_text(new_row, ci, val, bold=(ci == 0))
+    # 5. Build map of side label -> paint table BEFORE removing anything
+    side_table_map = {}
+    body_children = list(doc.element.body)
+    for i, child in enumerate(body_children):
+        if child.tag.split('}')[-1] == 'tbl':
+            from docx.table import Table
+            t = Table(child, doc)
+            if t.rows[0].cells[0].text.strip() == 'Surface':
+                # Look back for the side heading
+                for prev in reversed(body_children[:i]):
+                    if prev.tag.split('}')[-1] == 'p':
+                        txt = get_para_text(prev, doc)
+                        for sl in all_sides:
+                            if sl + ' of House' in txt:
+                                side_table_map[sl] = t
+                                break
+                        if txt: break
 
-    # 6. Side subheadings in body text
-    side_num_map = {0: 3, 1: 4, 2: 5, 3: 6}
-    side_label_keys = ['Front of House', 'Left of House', 'Right of House', 'Back of House']
-    for para in doc.paragraphs:
-        for i, key in enumerate(side_label_keys):
-            if key in para.text and para.runs:
-                sides = E.get('sides', [])
-                if i < len(sides):
-                    new_label = f"{side_num_map[i]}.  {sides[i]['label']} of House"
-                    para.runs[0].text = new_label
-                    for r in para.runs[1:]: r.text = ''
+    # 6. Update paint tables for active sides
+    for i, side in enumerate(sides_data):
+        label = side['label']
+        if label in side_table_map:
+            rebuild_paint_table(side_table_map[label], side.get('surfaces', []))
 
-    # 7. Duration
+    # 7. Remove unused side blocks
+    unused = [s for s in all_sides if s not in active_labels]
+    for sl in unused:
+        remove_side_block(doc, sl)
+
+    # 8. Renumber remaining side headings
+    for i, side in enumerate(sides_data):
+        label = side['label']
+        num = i + 3
+        for para in doc.paragraphs:
+            if label + ' of House' in para.text and para.runs:
+                para.runs[0].text = f"{num}.  {label} of House"
+                for r in para.runs[1:]: r.text = ''
+                break
+
+    # 9. Carpentry
+    carp_enabled = E.get('carpentry', {}).get('enabled', False)
+    if not carp_enabled:
+        body = doc.element.body
+        to_remove = []
+        for child in list(body):
+            tag = child.tag.split('}')[-1]
+            if tag == 'p' and 'Inspection & Carpentry' in get_para_text(child, doc):
+                to_remove.append(child)
+            elif tag == 'tbl' and 'IMPORTANT' in get_table_first_cell(child, doc):
+                to_remove.append(child)
+        for el in to_remove:
+            try: body.remove(el)
+            except: pass
+    else:
+        num = len(active_labels) + 3
+        for para in doc.paragraphs:
+            if 'Inspection & Carpentry' in para.text and para.runs:
+                para.runs[0].text = f"{num}.  Inspection & Carpentry (Work Change Order)"
+                for r in para.runs[1:]: r.text = ''
+                break
+
+    # 10. Duration
     for para in doc.paragraphs:
         if '(X–X)' in para.text:
             for run in para.runs:
                 run.text = run.text.replace('(X–X)', E.get('duration', 'X–X'))
 
-    # 8. Porta Potty toggle
-    if not E.get('portaPotty', True):
-        cost_tbl = doc.tables[10]
-        for row in list(cost_tbl.rows):
-            if 'Porta Potty' in row.cells[0].text:
-                row._element.getparent().remove(row._element)
-                break
+    # 11. Porta Potty
+    if not E.get('portaPotty', False):
+        for tbl in doc.tables:
+            for row in list(tbl.rows):
+                if 'Porta Potty' in row.cells[0].text:
+                    row._element.getparent().remove(row._element)
+                    break
 
-    # 9. Carpentry toggle — hide the box if off
-    if not E.get('carpentry', {}).get('enabled', True):
-        carp_tbl = doc.tables[7]
-        carp_tbl._element.getparent().remove(carp_tbl._element)
-
-    # Save to bytes
     buf = io.BytesIO()
     doc.save(buf)
     buf.seek(0)
@@ -163,14 +240,10 @@ def generate():
         client_name = E.get('client', {}).get('name', 'Client').replace(' ', '_')
         date = E.get('dateIssued', '').replace('/', '-')
         filename = f"LUCAZProposal_{client_name}_{date}.docx"
-        return send_file(
-            buf,
-            mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            as_attachment=True,
-            download_name=filename
-        )
+        return send_file(buf, mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document', as_attachment=True, download_name=filename)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        import traceback
+        return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
 
 @app.route('/health', methods=['GET'])
 def health():
