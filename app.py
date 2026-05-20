@@ -242,6 +242,24 @@ def generate_proposal(E):
                     if '(X–X)' in run.text:
                         run.text = run.text.replace('(X–X)', duration)
 
+    # 9b. Cost table — update with real numbers from dashboard
+    cost_map = {
+        'Subtotal': E.get('subtotal',''),
+        'Sales Tax': E.get('salesTaxAmt',''),
+        'Total Cost for Project': E.get('total',''),
+        'Deposit Due': E.get('deposit',''),
+        'Balance Due': E.get('balance',''),
+        'Porta Potty': E.get('portaPottyAmt','$200.00'),
+    }
+    for tbl in doc.tables:
+        for row in tbl.rows:
+            if len(row.cells) < 2: continue
+            cell0 = row.cells[0].text.strip()
+            for key, val in cost_map.items():
+                if val and key in cell0:
+                    set_cell_text(row.cells[1], val)
+                    break
+
     # 10. Porta Potty
     if not E.get('portaPotty', False):
         for tbl in doc.tables:
