@@ -10,9 +10,8 @@ CORS(app)
 
 TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'EXTERIOR_MASTER_TEMPLATE.docx')
 
-# Fixed table indices in the master template
+# Fixed table indices in master template — never changes
 SIDE_TABLE_IDX = {'Front': 3, 'Left': 4, 'Right': 5, 'Back': 6}
-CARP_TABLE_IDX = 7
 
 def set_cell_text(cell, new_text, bold=None, italic=None):
     for para in cell.paragraphs:
@@ -24,28 +23,39 @@ def set_cell_text(cell, new_text, bold=None, italic=None):
         if italic is not None: first.italic = italic
         return
 
-def set_row_cell_text(row_el, col_idx, text, bold=None):
+def set_run_text(row_el, col_idx, text, bold=None):
+    """Set text in a cell, preserving formatting but fixing color to black (auto)"""
     cells = row_el.findall(qn('w:tc'))
     if col_idx >= len(cells): return
     for p in cells[col_idx].findall(qn('w:p')):
         runs = p.findall(qn('w:r'))
         if runs:
             r = runs[0]
+            # Set text
             t = r.find(qn('w:t'))
             if t is None:
                 t = OxmlElement('w:t'); r.append(t)
             t.text = text
             t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+            # Fix run properties
             rpr = r.find(qn('w:rPr'))
-            if rpr is not None:
-                if bold is not None:
-                    b = rpr.find(qn('w:b'))
-                    if bold and b is None:
-                        b = OxmlElement('w:b'); rpr.insert(0, b)
-                    elif not bold and b is not None:
-                        rpr.remove(b)
-                i_el = rpr.find(qn('w:i'))
-                if i_el is not None: rpr.remove(i_el)
+            if rpr is None:
+                rpr = OxmlElement('w:rPr'); r.insert(0, rpr)
+            # Remove white color — set to auto/black
+            color_el = rpr.find(qn('w:color'))
+            if color_el is not None:
+                rpr.remove(color_el)
+            # Set bold
+            if bold is not None:
+                b = rpr.find(qn('w:b'))
+                if bold and b is None:
+                    b = OxmlElement('w:b'); rpr.insert(0, b)
+                elif not bold and b is not None:
+                    rpr.remove(b)
+            # Remove italic
+            i_el = rpr.find(qn('w:i'))
+            if i_el is not None: rpr.remove(i_el)
+            # Clear extra runs
             for extra_r in runs[1:]:
                 t2 = extra_r.find(qn('w:t'))
                 if t2 is not None: t2.text = ''
@@ -58,57 +68,76 @@ def get_para_text(el, doc):
     except: return ''
 
 def rebuild_paint_table(tbl, surfaces):
-    # Save header row as template
+    """Completely rebuild table with only the surfaces from the estimate"""
+    # Clone a DATA row (row 1) as template — not header row
+    # This ensures text color is black not white
+    if len(tbl.rows) < 2:
+        data_row_template = copy.deepcopy(tbl.rows[0]._element)
+    else:
+        data_row_template = copy.deepcopy(tbl.rows[1]._element)
+    
     hdr_el = copy.deepcopy(tbl.rows[0]._element)
+
     # Remove ALL rows
     for row in list(tbl.rows):
         tbl._element.remove(row._element)
-    # Re-add header
+
+    # Re-add header row
     tbl._element.append(copy.deepcopy(hdr_el))
-    # Add one row per surface
+
+    # Add one data row per surface using data row template
     for idx, sf in enumerate(surfaces):
         qty = sf.get('qty')
         try: qty_int = int(str(qty)) if qty else 0
         except: qty_int = 0
         nm = f"{sf['name']} × {qty_int}" if qty_int > 1 else sf['name']
-        new_row = copy.deepcopy(hdr_el)
+
+        new_row = copy.deepcopy(data_row_template)
+
+        # Set alternating background
         fill = 'FFFFFF' if idx % 2 == 0 else 'FAF5F5'
         for tc in new_row.findall(qn('w:tc')):
             shd = tc.find(f'.//{qn("w:shd")}')
             if shd is not None:
                 shd.set(qn('w:fill'), fill)
                 shd.set(qn('w:color'), 'auto')
+
         tbl._element.append(new_row)
+
+        # Set values — text color will be black since cloned from data row
         vals = [nm, sf.get('paint',''), sf.get('sheen',''), sf.get('color','TBD'), f"{sf.get('pc',2)} / {sf.get('prc',0)}"]
         for ci, val in enumerate(vals):
-            set_row_cell_text(new_row, ci, val, bold=(ci == 0))
+            set_run_text(new_row, ci, val, bold=(ci == 0))
 
 def remove_side_block(doc, side_label):
-    """Remove heading para + paint brand para + paint table + spacer for a side"""
+    """Remove heading + paint brand line + paint table + spacer for a given side"""
     search = side_label + ' of House'
     body = doc.element.body
     children = list(body)
     for i, child in enumerate(children):
-        if child.tag.split('}')[-1] == 'p' and search in get_para_text(child, doc):
-            to_remove = [child]
-            j = i + 1
-            count = 0
-            while j < len(children) and count < 3:
-                nc = children[j]
-                nc_tag = nc.tag.split('}')[-1]
-                nc_text = ''
-                if nc_tag == 'p':
-                    nc_text = get_para_text(nc, doc)
-                # Stop if we hit another major section
-                if nc_text and any(x in nc_text for x in ['of House','PROJECT PHOTOS','WARRANTY','PAYMENT','COST','NEXT','ESTIMATE','Inspection']):
-                    break
-                to_remove.append(nc)
-                j += 1
-                count += 1
-            for el in to_remove:
-                try: body.remove(el)
-                except: pass
-            return
+        if child.tag.split('}')[-1] == 'p':
+            txt = get_para_text(child, doc)
+            if search in txt:
+                # Collect: this heading + up to 3 more elements
+                to_remove = [child]
+                j = i + 1
+                while j < len(children) and len(to_remove) <= 3:
+                    nc = children[j]
+                    nc_tag = nc.tag.split('}')[-1]
+                    # Stop if we hit another side or major section
+                    if nc_tag == 'p':
+                        nc_txt = get_para_text(nc, doc)
+                        if nc_txt and any(x in nc_txt for x in [
+                            'of House','PROJECT PHOTOS','WARRANTY','PAYMENT',
+                            'COST','NEXT','ESTIMATE','Inspection','PROJECT INFORMATION'
+                        ]):
+                            break
+                    to_remove.append(nc)
+                    j += 1
+                for el in to_remove:
+                    try: body.remove(el)
+                    except: pass
+                return
 
 def generate_proposal(E):
     doc = Document(TEMPLATE_PATH)
@@ -136,22 +165,24 @@ def generate_proposal(E):
     # 3. Power wash bullets
     pw_cell = doc.tables[1].rows[0].cells[0]
     bps = [p for p in pw_cell.paragraphs if p.text.strip() and 'Power Washing' not in p.text]
-    for i, item in enumerate(E.get('powerWash', [])):
+    pw_items = E.get('powerWash', [])
+    for i, item in enumerate(pw_items):
         if i < len(bps) and bps[i].runs:
             for r in bps[i].runs: r.text = ''
             bps[i].runs[0].text = item
-    for i in range(len(E.get('powerWash',[])), len(bps)):
+    for i in range(len(pw_items), len(bps)):
         if bps[i].runs:
             for r in bps[i].runs: r.text = ''
 
     # 4. Surface prep bullets
     sp_cell = doc.tables[2].rows[0].cells[0]
     sps = [p for p in sp_cell.paragraphs if p.text.strip() and 'Surface Preparation' not in p.text]
-    for i, item in enumerate(E.get('surfacePrep', [])):
+    sp_items = E.get('surfacePrep', [])
+    for i, item in enumerate(sp_items):
         if i < len(sps) and sps[i].runs:
             for r in sps[i].runs: r.text = ''
             sps[i].runs[0].text = item
-    for i in range(len(E.get('surfacePrep',[])), len(sps)):
+    for i in range(len(sp_items), len(sps)):
         if sps[i].runs:
             for r in sps[i].runs: r.text = ''
 
@@ -159,10 +190,10 @@ def generate_proposal(E):
     for side in sides_data:
         label = side['label']
         tbl_idx = SIDE_TABLE_IDX.get(label)
-        if tbl_idx is not None:
+        if tbl_idx is not None and tbl_idx < len(doc.tables):
             rebuild_paint_table(doc.tables[tbl_idx], side.get('surfaces', []))
 
-    # 6. Remove unused side blocks (heading + paint brand + table + spacer)
+    # 6. Remove ALL unused side blocks
     unused = [s for s in all_sides if s not in active_labels]
     for sl in unused:
         remove_side_block(doc, sl)
@@ -188,8 +219,7 @@ def generate_proposal(E):
             elif tag == 'tbl':
                 try:
                     from docx.table import Table
-                    t = Table(child, doc)
-                    if 'IMPORTANT' in t.rows[0].cells[0].text:
+                    if 'IMPORTANT' in Table(child, doc).rows[0].cells[0].text:
                         to_remove.append(child)
                 except: pass
         for el in to_remove:
