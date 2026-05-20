@@ -267,59 +267,150 @@ def generate_proposal(E):
                     set_cell_text(row.cells[1], val)
                     break
 
-    # 9c. Photos — embed images into photo grid cells
+    # 9c. Photos — embed images, remove empty slots
     photos = E.get('photos', {})
-    if photos:
-        import base64
-        from docx.shared import Inches
-        from docx.oxml import OxmlElement as OE
+    import base64
+    from docx.shared import Inches
 
-        # Map label text in cell to photo key
-        label_to_key = {
-            'Back': 'Back', 'Left': 'Left', 'Garage': 'add1',
-            'Front': 'Front', 'Right': 'Right',
-            'Additional 1': 'add1', 'Additional 2': 'add2', 'Additional 3': 'add3'
-        }
-        # Find photo tables (tables 8 and 9 in template)
-        photo_tables = []
-        for tbl in doc.tables:
-            for row in tbl.rows:
-                for cell in row.cells:
-                    if '[ Insert Photo Here ]' in cell.text:
-                        photo_tables.append(tbl)
+    label_to_key = {
+        'Back': 'Back', 'Left': 'Left', 'Garage': 'add1',
+        'Front': 'Front', 'Right': 'Right',
+        'Additional 1': 'add1', 'Additional 2': 'add2', 'Additional 3': 'add3'
+    }
+
+    for tbl in doc.tables:
+        rows_to_remove = []
+        for row in tbl.rows:
+            cells_to_clear = []
+            all_empty = True
+            for cell in row.cells:
+                if '[ Insert Photo Here ]' not in cell.text:
+                    continue
+                # Find label
+                label = ''
+                for para in cell.paragraphs:
+                    if '[ Insert Photo Here ]' not in para.text and para.text.strip():
+                        label = para.text.strip()
                         break
-                else: continue
-                break
+                photo_key = label_to_key.get(label)
+                photo_data = photos.get(photo_key) if photo_key else None
 
-        for tbl in photo_tables:
-            for row in tbl.rows:
-                for cell in row.cells:
-                    if '[ Insert Photo Here ]' not in cell.text:
-                        continue
-                    # Find label (second paragraph in cell)
-                    label = ''
-                    for para in cell.paragraphs:
-                        if '[ Insert Photo Here ]' not in para.text and para.text.strip():
-                            label = para.text.strip()
-                            break
-                    photo_key = label_to_key.get(label)
-                    photo_data = photos.get(photo_key) if photo_key else None
-                    if photo_data and photo_data.startswith('data:image'):
-                        try:
-                            # Decode base64
-                            header, b64 = photo_data.split(',', 1)
-                            img_bytes = base64.b64decode(b64)
-                            img_buf = io.BytesIO(img_bytes)
-                            # Clear placeholder text from first para
-                            if cell.paragraphs:
-                                first_para = cell.paragraphs[0]
-                                for run in first_para.runs:
-                                    run.text = ''
-                                # Add image run to first para
-                                run = first_para.add_run()
-                                run.add_picture(img_buf, width=Inches(2.0))
-                        except Exception:
-                            pass  # Keep placeholder if image fails
+                if photo_data and photo_data.startswith('data:image'):
+                    all_empty = False
+                    try:
+                        header, b64 = photo_data.split(',', 1)
+                        img_bytes = base64.b64decode(b64)
+                        img_buf = io.BytesIO(img_bytes)
+                        # Replace placeholder with image
+                        if cell.paragraphs:
+                            first_para = cell.paragraphs[0]
+                            for run in first_para.runs:
+                                run.text = ''
+                            run = first_para.add_run()
+                            run.add_picture(img_buf, width=Inches(1.9))
+                    except Exception:
+                        pass
+                else:
+                    cells_to_clear.append(cell)
+
+            # If all cells in this row have no photos, remove the entire row
+            if all_empty and cells_to_clear:
+                rows_to_remove.append(row)
+
+        for row in rows_to_remove:
+            try: row._element.getparent().remove(row._element)
+            except: pass
+
+    # 11. Fix signature section — swap label/line order to: line then label underneath
+    sig_tbl = doc.tables[-1]
+    for col_idx in [0, 2]:
+        cell = sig_tbl.rows[0].cells[col_idx]
+        paras = list(cell.paragraphs)
+        # Current: [Name, Line, SigLabel, Line, empty, Line, Date]
+        # Target:  [Line, Name, Line, SigLabel, Line, Date]
+        # Rebuild by reordering: move label AFTER its line
+        # Simplest fix: swap each label+line pair so line comes first
+        p_elements = [p._element for p in paras]
+        # Remove all paragraphs and rebuild in correct order
+        for p_el in p_elements:
+            try: cell._element.remove(p_el)
+            except: pass
+
+        def add_line_para(cell, space_before=80):
+            from docx.oxml import OxmlElement
+            from docx.oxml.ns import qn
+            p = OxmlElement('w:p')
+            pPr = OxmlElement('w:pPr')
+            pBdr = OxmlElement('w:pBdr')
+            bottom = OxmlElement('w:bottom')
+            bottom.set(qn('w:val'), 'single')
+            bottom.set(qn('w:sz'), '4')
+            bottom.set(qn('w:space'), '1')
+            bottom.set(qn('w:color'), '333333')
+            pBdr.append(bottom)
+            spacing = OxmlElement('w:spacing')
+            spacing.set(qn('w:before'), str(space_before))
+            spacing.set(qn('w:after'), '40')
+            pPr.append(pBdr)
+            pPr.append(spacing)
+            p.append(pPr)
+            r = OxmlElement('w:r')
+            t = OxmlElement('w:t')
+            t.text = ' '
+            r.append(t)
+            p.append(r)
+            cell._element.append(p)
+
+        def add_label_para(cell, text, bold=False, color='555555', size=18):
+            from docx.oxml import OxmlElement
+            from docx.oxml.ns import qn
+            p = OxmlElement('w:p')
+            pPr = OxmlElement('w:pPr')
+            spacing = OxmlElement('w:spacing')
+            spacing.set(qn('w:before'), '20')
+            spacing.set(qn('w:after'), '80')
+            pPr.append(spacing)
+            p.append(pPr)
+            r = OxmlElement('w:r')
+            rPr = OxmlElement('w:rPr')
+            clr = OxmlElement('w:color')
+            clr.set(qn('w:val'), color)
+            rPr.append(clr)
+            sz = OxmlElement('w:sz')
+            sz.set(qn('w:val'), str(size))
+            rPr.append(sz)
+            fn = OxmlElement('w:rFonts')
+            fn.set(qn('w:ascii'), 'Calibri')
+            rPr.append(fn)
+            if bold:
+                b = OxmlElement('w:b')
+                rPr.append(b)
+            r.append(rPr)
+            t = OxmlElement('w:t')
+            t.text = text
+            t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+            r.append(t)
+            p.append(r)
+            cell._element.append(p)
+
+        # Build: Line → "Client Name" or "Contractor" (bold)
+        #        Line → "Client Signature" or "Authorized Signature"
+        #        (space)
+        #        Line → "Date"
+        if col_idx == 0:
+            add_line_para(cell, space_before=120)
+            add_label_para(cell, 'Client Name', bold=True)
+            add_line_para(cell, space_before=160)
+            add_label_para(cell, 'Client Signature')
+            add_line_para(cell, space_before=200)
+            add_label_para(cell, 'Date')
+        else:
+            add_line_para(cell, space_before=120)
+            add_label_para(cell, 'Contractor', bold=True)
+            add_line_para(cell, space_before=160)
+            add_label_para(cell, 'Authorized Signature')
+            add_line_para(cell, space_before=200)
+            add_label_para(cell, 'Date')
 
     # 10. Porta Potty
     if not E.get('portaPotty', False):
