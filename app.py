@@ -10,13 +10,15 @@ CORS(app)
 
 TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'EXTERIOR_MASTER_TEMPLATE.docx')
 
+# Fixed table indices in the master template
+SIDE_TABLE_IDX = {'Front': 3, 'Left': 4, 'Right': 5, 'Back': 6}
+CARP_TABLE_IDX = 7
+
 def set_cell_text(cell, new_text, bold=None, italic=None):
     for para in cell.paragraphs:
-        if not para.runs:
-            continue
+        if not para.runs: continue
         first = para.runs[0]
-        for run in para.runs[1:]:
-            run.text = ""
+        for run in para.runs[1:]: run.text = ""
         first.text = new_text
         if bold is not None: first.bold = bold
         if italic is not None: first.italic = italic
@@ -25,15 +27,13 @@ def set_cell_text(cell, new_text, bold=None, italic=None):
 def set_row_cell_text(row_el, col_idx, text, bold=None):
     cells = row_el.findall(qn('w:tc'))
     if col_idx >= len(cells): return
-    cell = cells[col_idx]
-    for p in cell.findall(qn('w:p')):
+    for p in cells[col_idx].findall(qn('w:p')):
         runs = p.findall(qn('w:r'))
         if runs:
             r = runs[0]
             t = r.find(qn('w:t'))
             if t is None:
-                t = OxmlElement('w:t')
-                r.append(t)
+                t = OxmlElement('w:t'); r.append(t)
             t.text = text
             t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
             rpr = r.find(qn('w:rPr'))
@@ -55,48 +55,22 @@ def get_para_text(el, doc):
     try:
         from docx.text.paragraph import Paragraph
         return Paragraph(el, doc).text.strip()
-    except:
-        return ''
-
-def get_table_first_cell(el, doc):
-    try:
-        from docx.table import Table
-        return Table(el, doc).rows[0].cells[0].text.strip()
-    except:
-        return ''
-
-def remove_side_block(doc, side_label):
-    search = side_label + ' of House'
-    body = doc.element.body
-    children = list(body)
-    for i, child in enumerate(children):
-        tag = child.tag.split('}')[-1]
-        if tag == 'p' and search in get_para_text(child, doc):
-            # Remove heading + next 3 elements (paint brand para, table, empty para)
-            to_remove = [child]
-            j = i + 1
-            while j < len(children) and len(to_remove) <= 3:
-                nc = children[j]
-                nc_tag = nc.tag.split('}')[-1]
-                nc_text = get_para_text(nc, doc) if nc_tag == 'p' else get_table_first_cell(nc, doc)
-                # Stop if we hit another major section
-                if nc_text and any(x in nc_text for x in ['of House','PROJECT PHOTOS','WARRANTY','PAYMENT','COST','NEXT','ESTIMATE','Inspection','Materials']):
-                    break
-                to_remove.append(nc)
-                j += 1
-            for el in to_remove:
-                try: body.remove(el)
-                except: pass
-            return
+    except: return ''
 
 def rebuild_paint_table(tbl, surfaces):
-    rows = list(tbl.rows)
-    for row in rows[1:]:
-        row._element.getparent().remove(row._element)
-    hdr_el = tbl.rows[0]._element
+    # Save header row as template
+    hdr_el = copy.deepcopy(tbl.rows[0]._element)
+    # Remove ALL rows
+    for row in list(tbl.rows):
+        tbl._element.remove(row._element)
+    # Re-add header
+    tbl._element.append(copy.deepcopy(hdr_el))
+    # Add one row per surface
     for idx, sf in enumerate(surfaces):
         qty = sf.get('qty')
-        nm = f"{sf['name']} × {qty}" if qty and int(str(qty)) > 1 else sf['name']
+        try: qty_int = int(str(qty)) if qty else 0
+        except: qty_int = 0
+        nm = f"{sf['name']} × {qty_int}" if qty_int > 1 else sf['name']
         new_row = copy.deepcopy(hdr_el)
         fill = 'FFFFFF' if idx % 2 == 0 else 'FAF5F5'
         for tc in new_row.findall(qn('w:tc')):
@@ -108,6 +82,33 @@ def rebuild_paint_table(tbl, surfaces):
         vals = [nm, sf.get('paint',''), sf.get('sheen',''), sf.get('color','TBD'), f"{sf.get('pc',2)} / {sf.get('prc',0)}"]
         for ci, val in enumerate(vals):
             set_row_cell_text(new_row, ci, val, bold=(ci == 0))
+
+def remove_side_block(doc, side_label):
+    """Remove heading para + paint brand para + paint table + spacer for a side"""
+    search = side_label + ' of House'
+    body = doc.element.body
+    children = list(body)
+    for i, child in enumerate(children):
+        if child.tag.split('}')[-1] == 'p' and search in get_para_text(child, doc):
+            to_remove = [child]
+            j = i + 1
+            count = 0
+            while j < len(children) and count < 3:
+                nc = children[j]
+                nc_tag = nc.tag.split('}')[-1]
+                nc_text = ''
+                if nc_tag == 'p':
+                    nc_text = get_para_text(nc, doc)
+                # Stop if we hit another major section
+                if nc_text and any(x in nc_text for x in ['of House','PROJECT PHOTOS','WARRANTY','PAYMENT','COST','NEXT','ESTIMATE','Inspection']):
+                    break
+                to_remove.append(nc)
+                j += 1
+                count += 1
+            for el in to_remove:
+                try: body.remove(el)
+                except: pass
+            return
 
 def generate_proposal(E):
     doc = Document(TEMPLATE_PATH)
@@ -139,6 +140,9 @@ def generate_proposal(E):
         if i < len(bps) and bps[i].runs:
             for r in bps[i].runs: r.text = ''
             bps[i].runs[0].text = item
+    for i in range(len(E.get('powerWash',[])), len(bps)):
+        if bps[i].runs:
+            for r in bps[i].runs: r.text = ''
 
     # 4. Surface prep bullets
     sp_cell = doc.tables[2].rows[0].cells[0]
@@ -147,47 +151,32 @@ def generate_proposal(E):
         if i < len(sps) and sps[i].runs:
             for r in sps[i].runs: r.text = ''
             sps[i].runs[0].text = item
+    for i in range(len(E.get('surfacePrep',[])), len(sps)):
+        if sps[i].runs:
+            for r in sps[i].runs: r.text = ''
 
-    # 5. Build map of side label -> paint table BEFORE removing anything
-    side_table_map = {}
-    body_children = list(doc.element.body)
-    for i, child in enumerate(body_children):
-        if child.tag.split('}')[-1] == 'tbl':
-            from docx.table import Table
-            t = Table(child, doc)
-            if t.rows[0].cells[0].text.strip() == 'Surface':
-                # Look back for the side heading
-                for prev in reversed(body_children[:i]):
-                    if prev.tag.split('}')[-1] == 'p':
-                        txt = get_para_text(prev, doc)
-                        for sl in all_sides:
-                            if sl + ' of House' in txt:
-                                side_table_map[sl] = t
-                                break
-                        if txt: break
-
-    # 6. Update paint tables for active sides
-    for i, side in enumerate(sides_data):
+    # 5. Rebuild paint tables using FIXED indices BEFORE removing anything
+    for side in sides_data:
         label = side['label']
-        if label in side_table_map:
-            rebuild_paint_table(side_table_map[label], side.get('surfaces', []))
+        tbl_idx = SIDE_TABLE_IDX.get(label)
+        if tbl_idx is not None:
+            rebuild_paint_table(doc.tables[tbl_idx], side.get('surfaces', []))
 
-    # 7. Remove unused side blocks
+    # 6. Remove unused side blocks (heading + paint brand + table + spacer)
     unused = [s for s in all_sides if s not in active_labels]
     for sl in unused:
         remove_side_block(doc, sl)
 
-    # 8. Renumber remaining side headings
+    # 7. Renumber remaining side headings
     for i, side in enumerate(sides_data):
-        label = side['label']
         num = i + 3
         for para in doc.paragraphs:
-            if label + ' of House' in para.text and para.runs:
-                para.runs[0].text = f"{num}.  {label} of House"
+            if side['label'] + ' of House' in para.text and para.runs:
+                para.runs[0].text = f"{num}.  {side['label']} of House"
                 for r in para.runs[1:]: r.text = ''
                 break
 
-    # 9. Carpentry
+    # 8. Carpentry
     carp_enabled = E.get('carpentry', {}).get('enabled', False)
     if not carp_enabled:
         body = doc.element.body
@@ -196,8 +185,13 @@ def generate_proposal(E):
             tag = child.tag.split('}')[-1]
             if tag == 'p' and 'Inspection & Carpentry' in get_para_text(child, doc):
                 to_remove.append(child)
-            elif tag == 'tbl' and 'IMPORTANT' in get_table_first_cell(child, doc):
-                to_remove.append(child)
+            elif tag == 'tbl':
+                try:
+                    from docx.table import Table
+                    t = Table(child, doc)
+                    if 'IMPORTANT' in t.rows[0].cells[0].text:
+                        to_remove.append(child)
+                except: pass
         for el in to_remove:
             try: body.remove(el)
             except: pass
@@ -209,13 +203,16 @@ def generate_proposal(E):
                 for r in para.runs[1:]: r.text = ''
                 break
 
-    # 10. Duration
-    for para in doc.paragraphs:
-        if '(X–X)' in para.text:
-            for run in para.runs:
-                run.text = run.text.replace('(X–X)', E.get('duration', 'X–X'))
+    # 9. Duration
+    duration = E.get('duration', '')
+    if duration:
+        for para in doc.paragraphs:
+            if '(X–X)' in para.text:
+                for run in para.runs:
+                    if '(X–X)' in run.text:
+                        run.text = run.text.replace('(X–X)', duration)
 
-    # 11. Porta Potty
+    # 10. Porta Potty
     if not E.get('portaPotty', False):
         for tbl in doc.tables:
             for row in list(tbl.rows):
