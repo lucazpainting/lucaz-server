@@ -3,10 +3,110 @@ from flask_cors import CORS
 from docx import Document
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
-import copy, io, os
+import copy, io, os, json, time
+import requests
+from google.oauth2 import service_account
 
 app = Flask(__name__)
 CORS(app)
+
+# ── GOOGLE DRIVE SETUP ──
+SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(__file__), 'service_account.json')
+SCOPES = ['https://www.googleapis.com/auth/drive']
+PROPOSALS_FOLDER_NAME = 'Proposals'
+
+def get_drive_token():
+    """Get a fresh access token for the service account"""
+    creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+    creds.refresh(requests.Request())
+    return creds.token
+
+def drive_request(method, url, token, **kwargs):
+    """Make an authenticated Drive API request"""
+    headers = kwargs.pop('headers', {})
+    headers['Authorization'] = f'Bearer {token}'
+    return requests.request(method, url, headers=headers, **kwargs)
+
+def get_or_create_folder(token, name, parent_id=None):
+    """Find folder by name, create if not exists"""
+    q = f"name='{name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    if parent_id:
+        q += f" and '{parent_id}' in parents"
+    res = drive_request('GET', 'https://www.googleapis.com/drive/v3/files',
+        token, params={'q': q, 'fields': 'files(id,name)'})
+    data = res.json()
+    files = data.get('files', [])
+    if files:
+        return files[0]['id']
+    # Create folder
+    meta = {'name': name, 'mimeType': 'application/vnd.google-apps.folder'}
+    if parent_id:
+        meta['parents'] = [parent_id]
+    res = drive_request('POST', 'https://www.googleapis.com/drive/v3/files',
+        token, json=meta, params={'fields': 'id'})
+    return res.json().get('id')
+
+def save_to_drive(doc_bytes, file_name, client_name, status='Active', existing_file_id=None):
+    """Save or update proposal in Drive"""
+    try:
+        token = get_drive_token()
+        proposals_id = get_or_create_folder(token, PROPOSALS_FOLDER_NAME)
+        status_id = get_or_create_folder(token, status, proposals_id)
+        client_id = get_or_create_folder(token, client_name, status_id)
+
+        mimetype = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+
+        if existing_file_id:
+            # Update in place
+            res = drive_request('PATCH',
+                f'https://www.googleapis.com/upload/drive/v3/files/{existing_file_id}',
+                token,
+                params={'uploadType': 'media', 'fields': 'id'},
+                headers={'Content-Type': mimetype},
+                data=doc_bytes
+            )
+            return res.json().get('id', existing_file_id)
+        else:
+            # Multipart upload
+            boundary = f'lucaz_{int(time.time())}'
+            meta = json.dumps({'name': file_name, 'parents': [client_id]})
+            body = (
+                f'--{boundary}\r\n'
+                f'Content-Type: application/json; charset=UTF-8\r\n\r\n'
+                f'{meta}\r\n'
+                f'--{boundary}\r\n'
+                f'Content-Type: {mimetype}\r\n\r\n'
+            ).encode() + doc_bytes + f'\r\n--{boundary}--'.encode()
+
+            res = drive_request('POST',
+                'https://www.googleapis.com/upload/drive/v3/files',
+                token,
+                params={'uploadType': 'multipart', 'fields': 'id'},
+                headers={'Content-Type': f'multipart/related; boundary={boundary}'},
+                data=body
+            )
+            return res.json().get('id')
+    except Exception as e:
+        print(f'Drive save error: {e}')
+        import traceback; traceback.print_exc()
+        return None
+
+def move_drive_file(file_id, old_status, new_status):
+    """Move file between status folders"""
+    try:
+        token = get_drive_token()
+        proposals_id = get_or_create_folder(token, PROPOSALS_FOLDER_NAME)
+        old_folder_id = get_or_create_folder(token, old_status, proposals_id)
+        new_folder_id = get_or_create_folder(token, new_status, proposals_id)
+        res = drive_request('PATCH',
+            f'https://www.googleapis.com/drive/v3/files/{file_id}',
+            token,
+            params={'addParents': new_folder_id, 'removeParents': old_folder_id, 'fields': 'id'}
+        )
+        return 'id' in res.json()
+    except Exception as e:
+        print(f'Drive move error: {e}')
+        return False
 
 TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'EXTERIOR_MASTER_TEMPLATE.docx')
 
@@ -434,13 +534,48 @@ def generate():
         if not E:
             return jsonify({'error': 'No data provided'}), 400
         buf = generate_proposal(E)
-        client_name = E.get('client', {}).get('name', 'Client').replace(' ', '_')
+        doc_bytes = buf.read()
+        client_name_raw = E.get('client', {}).get('name', 'Client')
+        client_name_safe = client_name_raw.replace(' ', '_')
         date = E.get('dateIssued', '').replace('/', '-')
-        filename = f"LUCAZProposal_{client_name}_{date}.docx"
-        return send_file(buf, mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document', as_attachment=True, download_name=filename)
+        filename = f"LUCAZProposal_{client_name_safe}_{date}.docx"
+        status = E.get('jobStatus', 'Active')
+        existing_file_id = E.get('driveFileId', None)
+
+        # Save to Drive server-side
+        drive_file_id = save_to_drive(doc_bytes, filename, client_name_raw, status, existing_file_id)
+
+        # Send file back to client for download
+        response = send_file(
+            io.BytesIO(doc_bytes),
+            mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            as_attachment=True,
+            download_name=filename
+        )
+        # Return Drive file ID in header so dashboard can store it
+        if drive_file_id:
+            response.headers['X-Drive-File-Id'] = drive_file_id
+        return response
     except Exception as e:
         import traceback
         return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
+
+@app.route('/move', methods=['POST', 'OPTIONS'])
+def move():
+    """Move a file between status folders in Drive"""
+    if request.method == 'OPTIONS':
+        return '', 200
+    try:
+        data = request.get_json()
+        file_id = data.get('fileId')
+        old_status = data.get('oldStatus')
+        new_status = data.get('newStatus')
+        if not all([file_id, old_status, new_status]):
+            return jsonify({'error': 'Missing fields'}), 400
+        success = move_drive_file(file_id, old_status, new_status)
+        return jsonify({'success': success})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/health', methods=['GET'])
 def health():
