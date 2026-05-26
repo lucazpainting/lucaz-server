@@ -14,6 +14,7 @@ CORS(app)
 SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(__file__), 'service_account.json')
 SCOPES = ['https://www.googleapis.com/auth/drive']
 PROPOSALS_FOLDER_NAME = 'Proposals'
+PROPOSALS_FOLDER_ID = '1MQA2U0eaEBM0w_T75-pHaYyO55T2d5nY'
 
 def get_drive_token():
     """Get a fresh access token for the service account"""
@@ -52,7 +53,8 @@ def save_to_drive(doc_bytes, file_name, client_name, status='Active', existing_f
     """Save or update proposal in Drive"""
     try:
         token = get_drive_token()
-        proposals_id = get_or_create_folder(token, PROPOSALS_FOLDER_NAME)
+        # Use hardcoded Proposals folder ID directly
+        proposals_id = PROPOSALS_FOLDER_ID
         status_id = get_or_create_folder(token, status, proposals_id)
         client_id = get_or_create_folder(token, client_name, status_id)
 
@@ -97,7 +99,7 @@ def move_drive_file(file_id, old_status, new_status):
     """Move file between status folders"""
     try:
         token = get_drive_token()
-        proposals_id = get_or_create_folder(token, PROPOSALS_FOLDER_NAME)
+        proposals_id = PROPOSALS_FOLDER_ID
         old_folder_id = get_or_create_folder(token, old_status, proposals_id)
         new_folder_id = get_or_create_folder(token, new_status, proposals_id)
         res = drive_request('PATCH',
@@ -612,11 +614,8 @@ def test_drive():
         token = get_drive_token()
         if not token:
             return jsonify({'success': False, 'error': 'Could not get access token'})
-        # Try to find Proposals folder
-        proposals_id = get_or_create_folder(token, PROPOSALS_FOLDER_NAME)
-        if not proposals_id:
-            return jsonify({'success': False, 'error': 'Could not find or create Proposals folder'})
-        # Try to find Active subfolder
+        # Use hardcoded Proposals folder ID
+        proposals_id = PROPOSALS_FOLDER_ID
         active_id = get_or_create_folder(token, 'Active', proposals_id)
         return jsonify({
             'success': True,
