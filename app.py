@@ -17,8 +17,9 @@ PROPOSALS_FOLDER_NAME = 'Proposals'
 
 def get_drive_token():
     """Get a fresh access token for the service account"""
+    import google.auth.transport.requests
     creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
-    creds.refresh(requests.Request())
+    creds.refresh(google.auth.transport.requests.Request())
     return creds.token
 
 def drive_request(method, url, token, **kwargs):
