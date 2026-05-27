@@ -420,33 +420,41 @@ def generate_proposal(E):
     import base64
     from docx.shared import Inches
 
-    # Build label to key map — include custom labels from dashboard
+    photo_labels = E.get('photoLabels', {})
+
+    # Build label to key map
+    # Template has: Back, Left, Garage (=add1), Front, Right
+    # Dashboard additional slots: add1, add2, add3
     label_to_key = {
-        'Back': 'Back', 'Left': 'Left', 'Garage': 'add1',
+        'Back': 'Back', 'Left': 'Left',
+        'Garage': 'add1',  # template default for add1 slot
         'Front': 'Front', 'Right': 'Right',
         'Additional 1': 'add1', 'Additional 2': 'add2', 'Additional 3': 'add3'
     }
-    # Add custom labels — if user typed "Deck" for add1, map 'Deck' -> 'add1'
-    photo_labels = E.get('photoLabels', {})
+    # Add reverse mapping from custom labels typed by user
     for key, custom_label in photo_labels.items():
         if custom_label:
             label_to_key[custom_label] = key
-    # Also update the template cell labels to show custom text
+
+    # Update template cell labels to show custom text AND fix Garage label
     for tbl in doc.tables:
         for row in tbl.rows:
             for cell in row.cells:
-                if '[ Insert Photo Here ]' not in cell.text: continue
+                if '[ Insert Photo Here ]' not in cell.text:
+                    continue
                 for para in cell.paragraphs:
                     txt = para.text.strip()
-                    # Check if this label matches a custom key
-                    for slot_key, custom_label in photo_labels.items():
-                        default_labels = {'add1':'Additional 1','add2':'Additional 2','add3':'Additional 3'}
-                        if txt == default_labels.get(slot_key) and custom_label:
-                            if para.runs:
-                                para.runs[0].text = custom_label
-                                for r in para.runs[1:]: r.text = ''
+                    if not txt or '[ Insert Photo Here ]' in txt:
+                        continue
+                    # Find which slot key this cell belongs to
+                    slot_key = label_to_key.get(txt)
+                    if slot_key and slot_key in photo_labels and photo_labels[slot_key]:
+                        # User typed a custom label for this slot — update cell text
+                        if para.runs:
+                            para.runs[0].text = photo_labels[slot_key]
+                            for r in para.runs[1:]: r.text = ''
 
-    # Find photo tables and process them
+    # Find photo tables and process them — remove cells/tables with no photos
     photo_tables_to_remove = []
     for tbl in doc.tables:
         is_photo_table = any(
@@ -462,15 +470,20 @@ def generate_proposal(E):
             for cell in row.cells:
                 if '[ Insert Photo Here ]' not in cell.text:
                     continue
+                # Get label from cell
                 label = ''
                 for para in cell.paragraphs:
                     txt = para.text.strip()
                     if txt and '[ Insert Photo Here ]' not in txt:
                         label = txt
                         break
-                # Try exact key match first, then stripped
+
+                # Check multiple ways to find the photo
                 photo_key = label_to_key.get(label) or label_to_key.get(label.strip()) or label
-                photo_data = photos.get(photo_key) or photos.get(label) or photos.get(label.strip())
+                photo_data = (photos.get(photo_key) or
+                             photos.get(label) or
+                             photos.get(label.strip()))
+
                 if photo_data and photo_data.startswith('data:image'):
                     has_any_photo_in_table = True
                     try:
@@ -485,14 +498,44 @@ def generate_proposal(E):
                             run.add_picture(img_buf, width=Inches(1.9))
                     except Exception as photo_err:
                         print(f'Photo embed error: {photo_err}')
+                else:
+                    # No photo for this cell — clear the placeholder text
+                    for para in cell.paragraphs:
+                        for run in para.runs:
+                            run.text = ''
 
         if not has_any_photo_in_table:
             photo_tables_to_remove.append(tbl)
 
-    # Remove entire photo tables that have no photos
+    # Remove entire photo tables that have no photos at all
     for tbl in photo_tables_to_remove:
         try: tbl._element.getparent().remove(tbl._element)
         except: pass
+
+    # Also remove individual rows in photo tables where NO cell has a photo
+    # (handles case where one row has photos and another doesn't)
+    for tbl in doc.tables:
+        rows_to_remove = []
+        for row in tbl.rows:
+            # Check if this row has any photo cells
+            photo_cells = [c for c in row.cells if '[ Insert Photo Here ]' in c.text]
+            if not photo_cells:
+                continue
+            # Check if any cell in this row has actual photo data (non-placeholder)
+            row_has_photo = False
+            for cell in photo_cells:
+                # If placeholder text was cleared, the cell is "empty" — check if it has an image
+                has_image = cell._element.find('.//{http://schemas.openxmlformats.org/drawingml/2006/main}blip') is not None
+                # Also check if placeholder text is still there (not replaced with image)
+                still_placeholder = any('[ Insert Photo Here ]' in p.text for p in cell.paragraphs)
+                if has_image or not still_placeholder:
+                    row_has_photo = True
+                    break
+            if not row_has_photo:
+                rows_to_remove.append(row)
+        for row in rows_to_remove:
+            try: row._element.getparent().remove(row._element)
+            except: pass
 
     # 11. Fix signature section — line first, label underneath
     sig_tbl = None
