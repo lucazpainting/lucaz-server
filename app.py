@@ -454,38 +454,53 @@ def generate_proposal(E):
                             para.runs[0].text = photo_labels[slot_key]
                             for r in para.runs[1:]: r.text = ''
 
-    # Find photo tables and process them — remove cells/tables with no photos
-    photo_tables_to_remove = []
-    for tbl in doc.tables:
-        is_photo_table = any(
-            '[ Insert Photo Here ]' in cell.text
-            for row in tbl.rows
-            for cell in row.cells
-        )
-        if not is_photo_table:
-            continue
+    # Process photo tables — embed photos, remove rows/tables with no photos
+    import base64
+    from docx.shared import Inches
 
-        has_any_photo_in_table = False
+    photo_labels = E.get('photoLabels', {})
+
+    # Build label to key map
+    label_to_key = {
+        'Back': 'Back', 'Left': 'Left', 'Garage': 'add1',
+        'Front': 'Front', 'Right': 'Right',
+        'Additional 1': 'add1', 'Additional 2': 'add2', 'Additional 3': 'add3'
+    }
+    for key, custom_label in photo_labels.items():
+        if custom_label:
+            label_to_key[custom_label] = key
+
+    # Update cell labels to show custom text
+    for tbl in doc.tables:
         for row in tbl.rows:
             for cell in row.cells:
                 if '[ Insert Photo Here ]' not in cell.text:
                     continue
-                # Get label from cell
+                for para in cell.paragraphs:
+                    txt = para.text.strip()
+                    if not txt or '[ Insert Photo Here ]' in txt:
+                        continue
+                    slot_key = label_to_key.get(txt)
+                    if slot_key and photo_labels.get(slot_key):
+                        if para.runs:
+                            para.runs[0].text = photo_labels[slot_key]
+                            for r in para.runs[1:]: r.text = ''
+
+    # Embed photos and track which cells have images
+    for tbl in doc.tables:
+        for row in tbl.rows:
+            for cell in row.cells:
+                if '[ Insert Photo Here ]' not in cell.text:
+                    continue
                 label = ''
                 for para in cell.paragraphs:
                     txt = para.text.strip()
                     if txt and '[ Insert Photo Here ]' not in txt:
                         label = txt
                         break
-
-                # Check multiple ways to find the photo
                 photo_key = label_to_key.get(label) or label_to_key.get(label.strip()) or label
-                photo_data = (photos.get(photo_key) or
-                             photos.get(label) or
-                             photos.get(label.strip()))
-
+                photo_data = photos.get(photo_key) or photos.get(label) or photos.get(label.strip())
                 if photo_data and photo_data.startswith('data:image'):
-                    has_any_photo_in_table = True
                     try:
                         header, b64 = photo_data.split(',', 1)
                         img_bytes = base64.b64decode(b64)
@@ -496,221 +511,48 @@ def generate_proposal(E):
                                 run.text = ''
                             run = first_para.add_run()
                             run.add_picture(img_buf, width=Inches(1.9))
-                    except Exception as photo_err:
-                        print(f'Photo embed error: {photo_err}')
-                else:
-                    # No photo — mark this cell as empty
-                    cell._empty_photo = True
+                    except Exception as pe:
+                        print(f'Photo error: {pe}')
 
-        if not has_any_photo_in_table:
-            photo_tables_to_remove.append(tbl)
+    # Now remove any photo table that has NO images at all
+    # Check by looking for drawing elements (images) in the table
+    tables_to_remove = []
+    for tbl in doc.tables:
+        # Check if this is a photo table
+        has_placeholder = any(
+            '[ Insert Photo Here ]' in cell.text
+            for row in tbl.rows for cell in row.cells
+        )
+        if not has_placeholder:
+            continue
+        # Check if table has any embedded images
+        ns = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+        has_image = tbl._element.find(f'.//{{{ns}}}blip') is not None
+        if not has_image:
+            tables_to_remove.append(tbl)
 
-    # Remove entire photo tables with no photos
-    for tbl in photo_tables_to_remove:
+    for tbl in tables_to_remove:
         try: tbl._element.getparent().remove(tbl._element)
         except: pass
 
-    # For tables that have SOME photos — rebuild to only include cells with photos
-    # We do this by replacing the table with a new one containing only filled cells
+    # For photo tables that DO have some images — remove rows where NO cell has an image
     for tbl in doc.tables:
-        # Skip if not a photo table
-        is_photo_table = any(
-            '[ Insert Photo Here ]' in cell.text or hasattr(cell, '_empty_photo')
+        has_placeholder = any(
+            '[ Insert Photo Here ]' in cell.text
             for row in tbl.rows for cell in row.cells
         )
-        if not is_photo_table:
+        if not has_placeholder:
             continue
-
-        # Collect only cells that have photos
-        filled_cells = []
+        ns = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+        rows_to_remove = []
         for row in tbl.rows:
-            for cell in row.cells:
-                if not hasattr(cell, '_empty_photo') and '[ Insert Photo Here ]' not in cell.text:
-                    # Regular non-photo cell, skip
-                    continue
-                if hasattr(cell, '_empty_photo'):
-                    continue  # Skip empty
-                # Has photo — keep it but clear placeholder text
-                filled_cells.append(cell)
-
-        if not filled_cells:
-            continue
-
-        # Clear placeholder text from filled cells (image already embedded)
-        for cell in filled_cells:
-            for para in cell.paragraphs:
-                if '[ Insert Photo Here ]' in para.text:
-                    for run in para.runs:
-                        run.text = ''
-
-        # Remove empty cells by clearing their content
-        for row in tbl.rows:
-            for cell in row.cells:
-                if hasattr(cell, '_empty_photo'):
-                    # Clear all content from this cell
-                    for para in cell.paragraphs:
-                        for run in para.runs:
-                            run.text = ''
-                    # Also remove any remaining text nodes
-                    from docx.oxml.ns import qn as _qn
-                    for p in list(cell._element.findall(_qn('w:p'))):
-                        for r in list(p.findall(_qn('w:r'))):
-                            for t in list(r.findall(_qn('w:t'))):
-                                t.text = ''
-                    # Remove the cell borders to hide it
-                    tcPr = cell._element.find(_qn('w:tcPr'))
-                    if tcPr is None:
-                        from docx.oxml import OxmlElement
-                        tcPr = OxmlElement('w:tcPr')
-                        cell._element.insert(0, tcPr)
-                    from docx.oxml import OxmlElement
-                    tcBorders = OxmlElement('w:tcBorders')
-                    for side in ['top','bottom','left','right']:
-                        b = OxmlElement(f'w:{side}')
-                        b.set(_qn('w:val'), 'nil')
-                        tcBorders.append(b)
-                    # Remove existing borders
-                    existing = tcPr.find(_qn('w:tcBorders'))
-                    if existing is not None: tcPr.remove(existing)
-                    tcPr.append(tcBorders)
-
-    # 11. Fix signature section — line first, label underneath
-    sig_tbl = None
-    for tbl in doc.tables:
-        if len(tbl.rows) > 0 and len(tbl.rows[0].cells) >= 3:
-            if 'Client' in tbl.rows[0].cells[0].text or 'Signature' in tbl.rows[0].cells[0].text:
-                sig_tbl = tbl
-                break
-
-    if sig_tbl:
-        from docx.oxml import OxmlElement
-        from docx.oxml.ns import qn
-
-        def add_line_para(cell, space_before=120):
-            p = OxmlElement('w:p')
-            pPr = OxmlElement('w:pPr')
-            pBdr = OxmlElement('w:pBdr')
-            bottom = OxmlElement('w:bottom')
-            bottom.set(qn('w:val'), 'single')
-            bottom.set(qn('w:sz'), '4')
-            bottom.set(qn('w:space'), '1')
-            bottom.set(qn('w:color'), '333333')
-            pBdr.append(bottom)
-            spacing = OxmlElement('w:spacing')
-            spacing.set(qn('w:before'), str(space_before))
-            spacing.set(qn('w:after'), '40')
-            pPr.append(pBdr)
-            pPr.append(spacing)
-            p.append(pPr)
-            r = OxmlElement('w:r')
-            t = OxmlElement('w:t')
-            t.text = ' '
-            r.append(t)
-            p.append(r)
-            cell._element.append(p)
-
-        def add_label_para(cell, text, bold=False):
-            p = OxmlElement('w:p')
-            pPr = OxmlElement('w:pPr')
-            spacing = OxmlElement('w:spacing')
-            spacing.set(qn('w:before'), '20')
-            spacing.set(qn('w:after'), '80')
-            pPr.append(spacing)
-            p.append(pPr)
-            r = OxmlElement('w:r')
-            rPr = OxmlElement('w:rPr')
-            clr = OxmlElement('w:color')
-            clr.set(qn('w:val'), '555555')
-            rPr.append(clr)
-            sz = OxmlElement('w:sz')
-            sz.set(qn('w:val'), '18')
-            rPr.append(sz)
-            fn = OxmlElement('w:rFonts')
-            fn.set(qn('w:ascii'), 'Calibri')
-            rPr.append(fn)
-            if bold:
-                b = OxmlElement('w:b')
-                rPr.append(b)
-            r.append(rPr)
-            t = OxmlElement('w:t')
-            t.text = text
-            t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
-            r.append(t)
-            p.append(r)
-            cell._element.append(p)
-
-        sig_configs = [
-            (0, 'Client Name', 'Client Signature'),
-            (2, 'Contractor', 'Authorized Signature')
-        ]
-        for col_idx, name_label, sig_label in sig_configs:
-            if col_idx >= len(sig_tbl.rows[0].cells):
-                continue
-            cell = sig_tbl.rows[0].cells[col_idx]
-
-            # Remove all existing paragraphs completely
-            for p_el in list(cell._element.findall(qn('w:p'))):
-                cell._element.remove(p_el)
-
-            def make_line(space_before=200):
-                p = OxmlElement('w:p')
-                pPr = OxmlElement('w:pPr')
-                pBdr = OxmlElement('w:pBdr')
-                bot = OxmlElement('w:bottom')
-                bot.set(qn('w:val'), 'single')
-                bot.set(qn('w:sz'), '6')
-                bot.set(qn('w:space'), '1')
-                bot.set(qn('w:color'), '000000')
-                pBdr.append(bot)
-                sp = OxmlElement('w:spacing')
-                sp.set(qn('w:before'), str(space_before))
-                sp.set(qn('w:after'), '60')
-                pPr.append(pBdr)
-                pPr.append(sp)
-                p.append(pPr)
-                r = OxmlElement('w:r')
-                t = OxmlElement('w:t')
-                t.text = ' '
-                r.append(t)
-                p.append(r)
-                return p
-
-            def make_label(text, bold=False, size=18):
-                p = OxmlElement('w:p')
-                pPr = OxmlElement('w:pPr')
-                sp = OxmlElement('w:spacing')
-                sp.set(qn('w:before'), '40')
-                sp.set(qn('w:after'), '40')
-                pPr.append(sp)
-                p.append(pPr)
-                r = OxmlElement('w:r')
-                rPr = OxmlElement('w:rPr')
-                szEl = OxmlElement('w:sz')
-                szEl.set(qn('w:val'), str(size))
-                rPr.append(szEl)
-                fn = OxmlElement('w:rFonts')
-                fn.set(qn('w:ascii'), 'Calibri')
-                fn.set(qn('w:hAnsi'), 'Calibri')
-                rPr.append(fn)
-                if bold:
-                    b = OxmlElement('w:b')
-                    rPr.append(b)
-                r.append(rPr)
-                t = OxmlElement('w:t')
-                t.text = text
-                t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
-                r.append(t)
-                p.append(r)
-                return p
-
-            # Build: spacer, line, Name label, spacer, line, Signature label, spacer, line, Date label
-            cell._element.append(make_label('', size=14))  # top spacer
-            cell._element.append(make_line(160))
-            cell._element.append(make_label(name_label, bold=True, size=18))
-            cell._element.append(make_line(200))
-            cell._element.append(make_label(sig_label, size=18))
-            cell._element.append(make_line(200))
-            cell._element.append(make_label('Date', size=18))
+            row_has_image = row._element.find(f'.//{{{ns}}}blip') is not None
+            row_has_placeholder = any('[ Insert Photo Here ]' in cell.text for cell in row.cells)
+            if row_has_placeholder and not row_has_image:
+                rows_to_remove.append(row)
+        for row in rows_to_remove:
+            try: row._element.getparent().remove(row._element)
+            except: pass
     # 10. Porta Potty
     if not E.get('portaPotty', False):
         for tbl in doc.tables:
