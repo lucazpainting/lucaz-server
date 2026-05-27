@@ -249,6 +249,50 @@ def generate_proposal(E):
     active_labels = [s['label'] for s in sides_data]
     all_sides = ['Front', 'Left', 'Right', 'Back']
 
+    # Fix footer — replace plain "Page" text with actual page number field
+    for sect in doc.sections:
+        ftr = sect.footer
+        for para in ftr.paragraphs:
+            for run in para.runs:
+                if run.text == 'Page':
+                    # Replace with: "Page " + PAGE field + " of " + NUMPAGES field
+                    run.text = 'Page '
+                    # Insert PAGE field after this run
+                    from docx.oxml import OxmlElement
+                    from docx.oxml.ns import qn
+                    def make_page_field(instr):
+                        r = OxmlElement('w:r')
+                        # Copy run properties
+                        rpr = run._element.find(qn('w:rPr'))
+                        if rpr is not None:
+                            import copy
+                            r.append(copy.deepcopy(rpr))
+                        fld_begin = OxmlElement('w:fldChar')
+                        fld_begin.set(qn('w:fldCharType'), 'begin')
+                        r.append(fld_begin)
+                        r2 = OxmlElement('w:r')
+                        if rpr is not None:
+                            import copy
+                            r2.append(copy.deepcopy(rpr))
+                        instr_el = OxmlElement('w:instrText')
+                        instr_el.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+                        instr_el.text = f' {instr} '
+                        r2.append(instr_el)
+                        r3 = OxmlElement('w:r')
+                        if rpr is not None:
+                            import copy
+                            r3.append(copy.deepcopy(rpr))
+                        fld_end = OxmlElement('w:fldChar')
+                        fld_end.set(qn('w:fldCharType'), 'end')
+                        r3.append(fld_end)
+                        return r, r2, r3
+                    # Insert PAGE field after the "Page " run
+                    parent = run._element.getparent()
+                    idx = list(parent).index(run._element)
+                    for el in reversed(make_page_field('PAGE')):
+                        parent.insert(idx + 1, el)
+                    break
+
     # 1. Proposal # / License / Date
     for para in doc.paragraphs:
         if 'Proposal #:' in para.text and 'License:' in para.text:
@@ -420,11 +464,13 @@ def generate_proposal(E):
                     continue
                 label = ''
                 for para in cell.paragraphs:
-                    if '[ Insert Photo Here ]' not in para.text and para.text.strip():
-                        label = para.text.strip()
+                    txt = para.text.strip()
+                    if txt and '[ Insert Photo Here ]' not in txt:
+                        label = txt
                         break
-                photo_key = label_to_key.get(label) or label
-                photo_data = photos.get(photo_key) if photo_key else None
+                # Try exact key match first, then stripped
+                photo_key = label_to_key.get(label) or label_to_key.get(label.strip()) or label
+                photo_data = photos.get(photo_key) or photos.get(label) or photos.get(label.strip())
                 if photo_data and photo_data.startswith('data:image'):
                     has_any_photo_in_table = True
                     try:
@@ -521,26 +567,70 @@ def generate_proposal(E):
             if col_idx >= len(sig_tbl.rows[0].cells):
                 continue
             cell = sig_tbl.rows[0].cells[col_idx]
-            # Clear text from existing paragraphs, keep structure
-            for para in cell.paragraphs:
-                for run in para.runs:
-                    run.text = ''
-            # Just update the label text in existing paragraphs
-            paras = [p for p in cell.paragraphs]
-            labels = [name_label, sig_label, 'Date']
-            label_idx = 0
-            for para in paras:
-                txt = para.text.strip()
-                # If paragraph has a border (it's a line), skip
-                pb = para._element.find(qn('w:pBdr'))
-                if pb is not None:
-                    continue
-                # It's a label paragraph — set the text
-                if label_idx < len(labels):
-                    if not para.runs:
-                        run = para.add_run()
-                    para.runs[0].text = labels[label_idx]
-                    label_idx += 1
+
+            # Remove all existing paragraphs completely
+            for p_el in list(cell._element.findall(qn('w:p'))):
+                cell._element.remove(p_el)
+
+            def make_line(space_before=200):
+                p = OxmlElement('w:p')
+                pPr = OxmlElement('w:pPr')
+                pBdr = OxmlElement('w:pBdr')
+                bot = OxmlElement('w:bottom')
+                bot.set(qn('w:val'), 'single')
+                bot.set(qn('w:sz'), '6')
+                bot.set(qn('w:space'), '1')
+                bot.set(qn('w:color'), '000000')
+                pBdr.append(bot)
+                sp = OxmlElement('w:spacing')
+                sp.set(qn('w:before'), str(space_before))
+                sp.set(qn('w:after'), '60')
+                pPr.append(pBdr)
+                pPr.append(sp)
+                p.append(pPr)
+                r = OxmlElement('w:r')
+                t = OxmlElement('w:t')
+                t.text = ' '
+                r.append(t)
+                p.append(r)
+                return p
+
+            def make_label(text, bold=False, size=18):
+                p = OxmlElement('w:p')
+                pPr = OxmlElement('w:pPr')
+                sp = OxmlElement('w:spacing')
+                sp.set(qn('w:before'), '40')
+                sp.set(qn('w:after'), '40')
+                pPr.append(sp)
+                p.append(pPr)
+                r = OxmlElement('w:r')
+                rPr = OxmlElement('w:rPr')
+                szEl = OxmlElement('w:sz')
+                szEl.set(qn('w:val'), str(size))
+                rPr.append(szEl)
+                fn = OxmlElement('w:rFonts')
+                fn.set(qn('w:ascii'), 'Calibri')
+                fn.set(qn('w:hAnsi'), 'Calibri')
+                rPr.append(fn)
+                if bold:
+                    b = OxmlElement('w:b')
+                    rPr.append(b)
+                r.append(rPr)
+                t = OxmlElement('w:t')
+                t.text = text
+                t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+                r.append(t)
+                p.append(r)
+                return p
+
+            # Build: spacer, line, Name label, spacer, line, Signature label, spacer, line, Date label
+            cell._element.append(make_label('', size=14))  # top spacer
+            cell._element.append(make_line(160))
+            cell._element.append(make_label(name_label, bold=True, size=18))
+            cell._element.append(make_line(200))
+            cell._element.append(make_label(sig_label, size=18))
+            cell._element.append(make_line(200))
+            cell._element.append(make_label('Date', size=18))
     # 10. Porta Potty
     if not E.get('portaPotty', False):
         for tbl in doc.tables:
