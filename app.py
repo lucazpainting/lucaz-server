@@ -37,22 +37,36 @@ def drive_request(method, url, token, **kwargs):
 
 def get_or_create_folder(token, name, parent_id=None):
     """Find folder by name, create if not exists"""
-    q = f"name='{name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
-    if parent_id:
-        q += f" and '{parent_id}' in parents"
-    res = drive_request('GET', 'https://www.googleapis.com/drive/v3/files',
-        token, params={'q': q, 'fields': 'files(id,name)'})
-    data = res.json()
-    files = data.get('files', [])
-    if files:
-        return files[0]['id']
-    # Create folder
-    meta = {'name': name, 'mimeType': 'application/vnd.google-apps.folder'}
-    if parent_id:
-        meta['parents'] = [parent_id]
-    res = drive_request('POST', 'https://www.googleapis.com/drive/v3/files',
-        token, json=meta, params={'fields': 'id'})
-    return res.json().get('id')
+    try:
+        q = f"name='{name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        if parent_id:
+            q += f" and '{parent_id}' in parents"
+        res = drive_request('GET', 'https://www.googleapis.com/drive/v3/files',
+            token, params={'q': q, 'fields': 'files(id,name)'})
+        data = res.json()
+        if data.get('error'):
+            print(f'FOLDER SEARCH ERROR: {data}', flush=True)
+            return None
+        files = data.get('files', [])
+        if files:
+            print(f'FOLDER FOUND: {name} id={files[0]["id"]}', flush=True)
+            return files[0]['id']
+        # Create folder
+        meta = {'name': name, 'mimeType': 'application/vnd.google-apps.folder'}
+        if parent_id:
+            meta['parents'] = [parent_id]
+        res = drive_request('POST', 'https://www.googleapis.com/drive/v3/files',
+            token, json=meta, params={'fields': 'id'})
+        data = res.json()
+        if data.get('error'):
+            print(f'FOLDER CREATE ERROR: {data}', flush=True)
+            return None
+        folder_id = data.get('id')
+        print(f'FOLDER CREATED: {name} id={folder_id}', flush=True)
+        return folder_id
+    except Exception as e:
+        print(f'FOLDER EXCEPTION: {e}', flush=True)
+        return None
 
 def save_to_drive(doc_bytes, file_name, client_name, status='Active', existing_file_id=None):
     """Save or update proposal in Drive"""
