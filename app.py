@@ -539,16 +539,19 @@ def generate_proposal(E):
         # Arrange in rows of up to 3
         W = 9360  # content width in DXA
 
-        def make_photo_cell(width, photo_data, label):
+        def make_photo_cell(width, photo_data, label, doc_ref):
+            """Build a table cell with an embedded photo and label"""
             from docx.oxml import OxmlElement
             from docx.oxml.ns import qn as _qn
+            from docx.shared import Inches
+            from docx.text.paragraph import Paragraph
+
             tc = OxmlElement('w:tc')
             tcPr = OxmlElement('w:tcPr')
             tcW = OxmlElement('w:tcW')
             tcW.set(_qn('w:w'), str(width))
             tcW.set(_qn('w:type'), 'dxa')
             tcPr.append(tcW)
-            # Add border
             tcBorders = OxmlElement('w:tcBorders')
             for side in ['top','left','bottom','right']:
                 b = OxmlElement(f'w:{side}')
@@ -559,39 +562,37 @@ def generate_proposal(E):
             tcPr.append(tcBorders)
             tc.append(tcPr)
 
-            # Photo paragraph
-            p1 = OxmlElement('w:p')
-            pPr1 = OxmlElement('w:pPr')
-            jc1 = OxmlElement('w:jc')
-            jc1.set(_qn('w:val'), 'center')
-            sp1 = OxmlElement('w:spacing')
-            sp1.set(_qn('w:before'), '60')
-            sp1.set(_qn('w:after'), '40')
-            pPr1.append(jc1)
-            pPr1.append(sp1)
-            p1.append(pPr1)
-
+            # Add photo using a temp paragraph on the actual document
+            # This ensures the image relationship is stored in the right part
+            tmp_para = doc_ref.add_paragraph()
+            tmp_para.alignment = 1  # CENTER
             if photo_data and photo_data.startswith('data:image'):
                 try:
                     header, b64 = photo_data.split(',', 1)
                     img_bytes = base64.b64decode(b64)
                     img_buf = io.BytesIO(img_bytes)
-                    r = OxmlElement('w:r')
-                    from docx.oxml.shared import OxmlElement as OE
-                    # Use a temporary paragraph to add picture
-                    from docx import Document as _Doc
-                    _tmp = _Doc()
-                    _p = _tmp.add_paragraph()
-                    _run = _p.add_run()
-                    _run.add_picture(img_buf, width=Inches(min(2.5, width/1440)))
-                    # Get the drawing element
-                    drawing = _p._element.find(f'.//{_qn("w:drawing")}')
-                    if drawing is not None:
-                        r.append(drawing)
-                    p1.append(r)
+                    run = tmp_para.add_run()
+                    run.add_picture(img_buf, width=Inches(min(2.3, width/1440.0)))
                 except Exception as e:
-                    print(f'Photo build error: {e}')
-            tc.append(p1)
+                    print(f'Photo embed error: {e}')
+
+            # Set paragraph spacing
+            pPr = tmp_para._element.find(_qn('w:pPr'))
+            if pPr is None:
+                pPr = OxmlElement('w:pPr')
+                tmp_para._element.insert(0, pPr)
+            sp = OxmlElement('w:spacing')
+            sp.set(_qn('w:before'), '60')
+            sp.set(_qn('w:after'), '40')
+            pPr.append(sp)
+            jc = OxmlElement('w:jc')
+            jc.set(_qn('w:val'), 'center')
+            pPr.append(jc)
+
+            # Move paragraph element to cell
+            p1_el = tmp_para._element
+            doc_ref.paragraphs[-1]._element.getparent().remove(p1_el)
+            tc.append(p1_el)
 
             # Label paragraph
             p2 = OxmlElement('w:p')
@@ -606,11 +607,11 @@ def generate_proposal(E):
             p2.append(pPr2)
             r2 = OxmlElement('w:r')
             rPr2 = OxmlElement('w:rPr')
-            b_el = OxmlElement('w:b')
-            fn = OxmlElement('w:rFonts')
-            fn.set(_qn('w:ascii'), 'Calibri')
-            rPr2.append(b_el)
-            rPr2.append(fn)
+            b_el2 = OxmlElement('w:b')
+            fn2 = OxmlElement('w:rFonts')
+            fn2.set(_qn('w:ascii'), 'Calibri')
+            rPr2.append(b_el2)
+            rPr2.append(fn2)
             r2.append(rPr2)
             t_el = OxmlElement('w:t')
             t_el.text = label
@@ -641,7 +642,7 @@ def generate_proposal(E):
             tbl.append(tblGrid)
             tr = OxmlElement('w:tr')
             for key, label, photo_data in photo_row:
-                tc = make_photo_cell(col_w, photo_data, label)
+                tc = make_photo_cell(col_w, photo_data, label, doc)
                 tr.append(tc)
             tbl.append(tr)
             return tbl
@@ -682,6 +683,22 @@ def generate_proposal(E):
                 if ri < len(rows) - 1:
                     parent.insert(idx, copy.deepcopy(sp_para))
                     idx += 1
+    # Fix spacing after "Photos of the areas..." paragraph
+    for para in doc.paragraphs:
+        if 'Photos of the areas' in para.text:
+            from docx.oxml import OxmlElement
+            from docx.oxml.ns import qn
+            pPr = para._element.find(qn('w:pPr'))
+            if pPr is None:
+                pPr = OxmlElement('w:pPr')
+                para._element.insert(0, pPr)
+            sp = pPr.find(qn('w:spacing'))
+            if sp is None:
+                sp = OxmlElement('w:spacing')
+                pPr.append(sp)
+            sp.set(qn('w:after'), '40')
+            break
+
     # 10. Porta Potty
     if not E.get('portaPotty', False):
         for tbl in doc.tables:
@@ -689,6 +706,83 @@ def generate_proposal(E):
                 if 'Porta Potty' in row.cells[0].text:
                     row._element.getparent().remove(row._element)
                     break
+
+    # 11. Fix signature section — line first, label underneath
+    sig_tbl = None
+    for tbl in doc.tables:
+        if len(tbl.rows) > 0 and len(tbl.rows[0].cells) >= 3:
+            if 'Client' in tbl.rows[0].cells[0].text or 'Signature' in tbl.rows[0].cells[0].text:
+                sig_tbl = tbl
+                break
+
+    if sig_tbl:
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+
+        def make_sig_line(space_before=160):
+            p = OxmlElement('w:p')
+            pPr = OxmlElement('w:pPr')
+            pBdr = OxmlElement('w:pBdr')
+            bot = OxmlElement('w:bottom')
+            bot.set(qn('w:val'), 'single')
+            bot.set(qn('w:sz'), '6')
+            bot.set(qn('w:space'), '1')
+            bot.set(qn('w:color'), '000000')
+            pBdr.append(bot)
+            sp = OxmlElement('w:spacing')
+            sp.set(qn('w:before'), str(space_before))
+            sp.set(qn('w:after'), '40')
+            pPr.append(pBdr)
+            pPr.append(sp)
+            p.append(pPr)
+            r = OxmlElement('w:r')
+            t = OxmlElement('w:t')
+            t.text = ' '
+            r.append(t)
+            p.append(r)
+            return p
+
+        def make_sig_label(text, bold=False):
+            p = OxmlElement('w:p')
+            pPr = OxmlElement('w:pPr')
+            sp = OxmlElement('w:spacing')
+            sp.set(qn('w:before'), '40')
+            sp.set(qn('w:after'), '20')
+            pPr.append(sp)
+            p.append(pPr)
+            r = OxmlElement('w:r')
+            rPr = OxmlElement('w:rPr')
+            fn = OxmlElement('w:rFonts')
+            fn.set(qn('w:ascii'), 'Calibri')
+            fn.set(qn('w:hAnsi'), 'Calibri')
+            rPr.append(fn)
+            sz = OxmlElement('w:sz')
+            sz.set(qn('w:val'), '18')
+            rPr.append(sz)
+            if bold:
+                b = OxmlElement('w:b')
+                rPr.append(b)
+            r.append(rPr)
+            t = OxmlElement('w:t')
+            t.text = text
+            t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+            r.append(t)
+            p.append(r)
+            return p
+
+        for col_idx, name_label, sig_label in [(0,'Client Name','Client Signature'),(2,'Contractor','Authorized Signature')]:
+            if col_idx >= len(sig_tbl.rows[0].cells):
+                continue
+            cell = sig_tbl.rows[0].cells[col_idx]
+            for p_el in list(cell._element.findall(qn('w:p'))):
+                cell._element.remove(p_el)
+            cell._element.append(make_sig_label('', bold=False))
+            cell._element.append(make_sig_line(120))
+            cell._element.append(make_sig_label(name_label, bold=True))
+            cell._element.append(make_sig_line(180))
+            cell._element.append(make_sig_label(sig_label))
+            cell._element.append(make_sig_line(180))
+            cell._element.append(make_sig_label('Date'))
 
     buf = io.BytesIO()
     doc.save(buf)
