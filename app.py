@@ -499,43 +499,80 @@ def generate_proposal(E):
                     except Exception as photo_err:
                         print(f'Photo embed error: {photo_err}')
                 else:
-                    # No photo for this cell — clear the placeholder text
-                    for para in cell.paragraphs:
-                        for run in para.runs:
-                            run.text = ''
+                    # No photo — mark this cell as empty
+                    cell._empty_photo = True
 
         if not has_any_photo_in_table:
             photo_tables_to_remove.append(tbl)
 
-    # Remove entire photo tables that have no photos at all
+    # Remove entire photo tables with no photos
     for tbl in photo_tables_to_remove:
         try: tbl._element.getparent().remove(tbl._element)
         except: pass
 
-    # Also remove individual rows in photo tables where NO cell has a photo
-    # (handles case where one row has photos and another doesn't)
+    # For tables that have SOME photos — rebuild to only include cells with photos
+    # We do this by replacing the table with a new one containing only filled cells
     for tbl in doc.tables:
-        rows_to_remove = []
+        # Skip if not a photo table
+        is_photo_table = any(
+            '[ Insert Photo Here ]' in cell.text or hasattr(cell, '_empty_photo')
+            for row in tbl.rows for cell in row.cells
+        )
+        if not is_photo_table:
+            continue
+
+        # Collect only cells that have photos
+        filled_cells = []
         for row in tbl.rows:
-            # Check if this row has any photo cells
-            photo_cells = [c for c in row.cells if '[ Insert Photo Here ]' in c.text]
-            if not photo_cells:
-                continue
-            # Check if any cell in this row has actual photo data (non-placeholder)
-            row_has_photo = False
-            for cell in photo_cells:
-                # If placeholder text was cleared, the cell is "empty" — check if it has an image
-                has_image = cell._element.find('.//{http://schemas.openxmlformats.org/drawingml/2006/main}blip') is not None
-                # Also check if placeholder text is still there (not replaced with image)
-                still_placeholder = any('[ Insert Photo Here ]' in p.text for p in cell.paragraphs)
-                if has_image or not still_placeholder:
-                    row_has_photo = True
-                    break
-            if not row_has_photo:
-                rows_to_remove.append(row)
-        for row in rows_to_remove:
-            try: row._element.getparent().remove(row._element)
-            except: pass
+            for cell in row.cells:
+                if not hasattr(cell, '_empty_photo') and '[ Insert Photo Here ]' not in cell.text:
+                    # Regular non-photo cell, skip
+                    continue
+                if hasattr(cell, '_empty_photo'):
+                    continue  # Skip empty
+                # Has photo — keep it but clear placeholder text
+                filled_cells.append(cell)
+
+        if not filled_cells:
+            continue
+
+        # Clear placeholder text from filled cells (image already embedded)
+        for cell in filled_cells:
+            for para in cell.paragraphs:
+                if '[ Insert Photo Here ]' in para.text:
+                    for run in para.runs:
+                        run.text = ''
+
+        # Remove empty cells by clearing their content
+        for row in tbl.rows:
+            for cell in row.cells:
+                if hasattr(cell, '_empty_photo'):
+                    # Clear all content from this cell
+                    for para in cell.paragraphs:
+                        for run in para.runs:
+                            run.text = ''
+                    # Also remove any remaining text nodes
+                    from docx.oxml.ns import qn as _qn
+                    for p in list(cell._element.findall(_qn('w:p'))):
+                        for r in list(p.findall(_qn('w:r'))):
+                            for t in list(r.findall(_qn('w:t'))):
+                                t.text = ''
+                    # Remove the cell borders to hide it
+                    tcPr = cell._element.find(_qn('w:tcPr'))
+                    if tcPr is None:
+                        from docx.oxml import OxmlElement
+                        tcPr = OxmlElement('w:tcPr')
+                        cell._element.insert(0, tcPr)
+                    from docx.oxml import OxmlElement
+                    tcBorders = OxmlElement('w:tcBorders')
+                    for side in ['top','bottom','left','right']:
+                        b = OxmlElement(f'w:{side}')
+                        b.set(_qn('w:val'), 'nil')
+                        tcBorders.append(b)
+                    # Remove existing borders
+                    existing = tcPr.find(_qn('w:tcBorders'))
+                    if existing is not None: tcPr.remove(existing)
+                    tcPr.append(tcBorders)
 
     # 11. Fix signature section — line first, label underneath
     sig_tbl = None
