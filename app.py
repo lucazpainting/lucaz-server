@@ -454,125 +454,234 @@ def generate_proposal(E):
                             para.runs[0].text = photo_labels[slot_key]
                             for r in para.runs[1:]: r.text = ''
 
-    # Process photo tables — embed photos, remove rows/tables with no photos
+    # Build dynamic photo grid — only include photos that exist
     import base64
-    from docx.shared import Inches
+    from docx.shared import Inches, Pt
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn as _qn
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+    import copy
 
     photo_labels = E.get('photoLabels', {})
 
-    # Build label to key map
+    # Build ordered list of (key, label, photo_data) for photos that exist
     label_to_key = {
-        'Back': 'Back', 'Left': 'Left', 'Garage': 'add1',
-        'Front': 'Front', 'Right': 'Right',
-        'Additional 1': 'add1', 'Additional 2': 'add2', 'Additional 3': 'add3'
+        'Back':'Back','Left':'Left','Garage':'add1',
+        'Front':'Front','Right':'Right',
+        'Additional 1':'add1','Additional 2':'add2','Additional 3':'add3'
     }
     for key, custom_label in photo_labels.items():
         if custom_label:
             label_to_key[custom_label] = key
 
-    # Update cell labels to show custom text
-    for tbl in doc.tables:
-        for row in tbl.rows:
-            for cell in row.cells:
-                if '[ Insert Photo Here ]' not in cell.text:
-                    continue
-                for para in cell.paragraphs:
-                    txt = para.text.strip()
-                    if not txt or '[ Insert Photo Here ]' in txt:
-                        continue
-                    slot_key = label_to_key.get(txt)
-                    if slot_key and photo_labels.get(slot_key):
-                        if para.runs:
-                            para.runs[0].text = photo_labels[slot_key]
-                            for r in para.runs[1:]: r.text = ''
+    # Collect photos that actually have data
+    active_photos = []
+    # Check side photos first (in order of sides)
+    side_labels = [s['label'] for s in sides_data]
+    for side_label in side_labels:
+        key = side_label
+        photo_data = photos.get(key)
+        display_label = photo_labels.get(key) or f'{side_label} side'
+        if photo_data and photo_data.startswith('data:image'):
+            active_photos.append((key, display_label, photo_data))
 
-    # Embed photos and track which cells have images
-    for tbl in doc.tables:
-        for row in tbl.rows:
-            for cell in row.cells:
-                if '[ Insert Photo Here ]' not in cell.text:
-                    continue
-                label = ''
-                for para in cell.paragraphs:
-                    txt = para.text.strip()
-                    if txt and '[ Insert Photo Here ]' not in txt:
-                        label = txt
-                        break
-                photo_key = label_to_key.get(label) or label_to_key.get(label.strip()) or label
-                photo_data = photos.get(photo_key) or photos.get(label) or photos.get(label.strip())
-                if photo_data and photo_data.startswith('data:image'):
-                    try:
-                        header, b64 = photo_data.split(',', 1)
-                        img_bytes = base64.b64decode(b64)
-                        img_buf = io.BytesIO(img_bytes)
-                        if cell.paragraphs:
-                            first_para = cell.paragraphs[0]
-                            # Clear ALL runs and text completely
-                            for run in first_para.runs:
-                                run.text = ''
-                            # Also clear any raw text nodes
-                            from docx.oxml.ns import qn as _qn
-                            for t_el in first_para._element.findall(f'.//{_qn("w:t")}'):
-                                t_el.text = ''
-                            # Add image
-                            run = first_para.add_run()
-                            run.add_picture(img_buf, width=Inches(1.9))
-                    except Exception as pe:
-                        print(f'Photo error: {pe}')
+    # Then additional photos
+    for slot_key in ['add1','add2','add3']:
+        photo_data = photos.get(slot_key)
+        display_label = photo_labels.get(slot_key) or f'Additional {slot_key[-1]}'
+        if photo_data and photo_data.startswith('data:image'):
+            active_photos.append((slot_key, display_label, photo_data))
 
-    # Clean up photo cells — hide cells with no photo by clearing content and borders
-    ns = 'http://schemas.openxmlformats.org/drawingml/2006/main'
-    
-    for tbl in list(doc.tables):
-        is_photo_table = any(
+    # Remove existing photo tables from document
+    body = doc.element.body
+    photo_tbls_to_remove = []
+    for tbl in doc.tables:
+        if any(
             any('[ Insert Photo Here ]' in para.text for para in cell.paragraphs)
             for row in tbl.rows for cell in row.cells
-        ) or any(row._element.find(f'.//{{{ns}}}blip') is not None for row in tbl.rows)
-        
-        if not is_photo_table:
-            continue
-        
-        table_has_any_image = tbl._element.find(f'.//{{{ns}}}blip') is not None
-        
-        if not table_has_any_image:
-            # Entire table has no photos — remove it
-            try: tbl._element.getparent().remove(tbl._element)
-            except: pass
-            continue
-        
-        # Table has some images — clear empty cells
-        for row in tbl.rows:
-            for cell in row.cells:
-                cell_has_image = cell._element.find(f'.//{{{ns}}}blip') is not None
-                cell_has_placeholder = any('[ Insert Photo Here ]' in para.text for para in cell.paragraphs)
-                if cell_has_placeholder and not cell_has_image:
-                    # Clear all content from this cell
-                    for para in cell.paragraphs:
-                        for run in para.runs:
-                            run.text = ''
-                        for t_el in para._element.findall(f'.//{qn("w:t")}'):
-                            t_el.text = ''
-                    # Remove cell borders so it's invisible
-                    tcPr = cell._element.find(qn('w:tcPr'))
-                    if tcPr is None:
-                        tcPr = OxmlElement('w:tcPr')
-                        cell._element.insert(0, tcPr)
-                    tcBorders = OxmlElement('w:tcBorders')
-                    for side in ['top','bottom','left','right','insideH','insideV']:
-                        b = OxmlElement(f'w:{side}')
-                        b.set(qn('w:val'), 'nil')
-                        tcBorders.append(b)
-                    existing = tcPr.find(qn('w:tcBorders'))
-                    if existing is not None: tcPr.remove(existing)
-                    tcPr.append(tcBorders)
-                    # Set background to white
-                    shd = tcPr.find(qn('w:shd'))
-                    if shd is None:
-                        shd = OxmlElement('w:shd')
-                        tcPr.append(shd)
-                    shd.set(qn('w:val'), 'clear')
-                    shd.set(qn('w:color'), 'auto')
-                    shd.set(qn('w:fill'), 'FFFFFF')
+        ):
+            photo_tbls_to_remove.append(tbl)
+
+    # Remember position of first photo table to insert new ones there
+    insert_after_el = None
+    for tbl in photo_tbls_to_remove:
+        if insert_after_el is None:
+            insert_after_el = tbl._element
+        body.remove(tbl._element)
+
+    # If no photos at all, just remove the "PROJECT PHOTOS" section header too
+    if not active_photos:
+        # Remove the PROJECT PHOTOS heading and intro paragraph
+        children = list(body)
+        for i, child in enumerate(children):
+            if child.tag.split('}')[-1] == 'p':
+                from docx.text.paragraph import Paragraph
+                txt = Paragraph(child, doc).text.strip()
+                if 'PROJECT PHOTOS' in txt:
+                    # Remove heading and next 2 paragraphs
+                    to_rm = [child]
+                    j = i + 1
+                    while j < len(children) and len(to_rm) < 3:
+                        nc = children[j]
+                        if nc.tag.split('}')[-1] == 'p':
+                            nc_txt = Paragraph(nc, doc).text.strip()
+                            if nc_txt and any(x in nc_txt for x in ['PROJECT INFORMATION','WARRANTY','PAYMENT','COST']):
+                                break
+                            to_rm.append(nc)
+                        j += 1
+                    for el in to_rm:
+                        try: body.remove(el)
+                        except: pass
+                    break
+    else:
+        # Build new photo tables with only active photos
+        # Arrange in rows of up to 3
+        W = 9360  # content width in DXA
+
+        def make_photo_cell(width, photo_data, label):
+            from docx.oxml import OxmlElement
+            from docx.oxml.ns import qn as _qn
+            tc = OxmlElement('w:tc')
+            tcPr = OxmlElement('w:tcPr')
+            tcW = OxmlElement('w:tcW')
+            tcW.set(_qn('w:w'), str(width))
+            tcW.set(_qn('w:type'), 'dxa')
+            tcPr.append(tcW)
+            # Add border
+            tcBorders = OxmlElement('w:tcBorders')
+            for side in ['top','left','bottom','right']:
+                b = OxmlElement(f'w:{side}')
+                b.set(_qn('w:val'), 'single')
+                b.set(_qn('w:sz'), '4')
+                b.set(_qn('w:color'), 'CCCCCC')
+                tcBorders.append(b)
+            tcPr.append(tcBorders)
+            tc.append(tcPr)
+
+            # Photo paragraph
+            p1 = OxmlElement('w:p')
+            pPr1 = OxmlElement('w:pPr')
+            jc1 = OxmlElement('w:jc')
+            jc1.set(_qn('w:val'), 'center')
+            sp1 = OxmlElement('w:spacing')
+            sp1.set(_qn('w:before'), '60')
+            sp1.set(_qn('w:after'), '40')
+            pPr1.append(jc1)
+            pPr1.append(sp1)
+            p1.append(pPr1)
+
+            if photo_data and photo_data.startswith('data:image'):
+                try:
+                    header, b64 = photo_data.split(',', 1)
+                    img_bytes = base64.b64decode(b64)
+                    img_buf = io.BytesIO(img_bytes)
+                    r = OxmlElement('w:r')
+                    from docx.oxml.shared import OxmlElement as OE
+                    # Use a temporary paragraph to add picture
+                    from docx import Document as _Doc
+                    _tmp = _Doc()
+                    _p = _tmp.add_paragraph()
+                    _run = _p.add_run()
+                    _run.add_picture(img_buf, width=Inches(min(2.5, width/1440)))
+                    # Get the drawing element
+                    drawing = _p._element.find(f'.//{_qn("w:drawing")}')
+                    if drawing is not None:
+                        r.append(drawing)
+                    p1.append(r)
+                except Exception as e:
+                    print(f'Photo build error: {e}')
+            tc.append(p1)
+
+            # Label paragraph
+            p2 = OxmlElement('w:p')
+            pPr2 = OxmlElement('w:pPr')
+            jc2 = OxmlElement('w:jc')
+            jc2.set(_qn('w:val'), 'center')
+            sp2 = OxmlElement('w:spacing')
+            sp2.set(_qn('w:before'), '0')
+            sp2.set(_qn('w:after'), '60')
+            pPr2.append(jc2)
+            pPr2.append(sp2)
+            p2.append(pPr2)
+            r2 = OxmlElement('w:r')
+            rPr2 = OxmlElement('w:rPr')
+            b_el = OxmlElement('w:b')
+            fn = OxmlElement('w:rFonts')
+            fn.set(_qn('w:ascii'), 'Calibri')
+            rPr2.append(b_el)
+            rPr2.append(fn)
+            r2.append(rPr2)
+            t_el = OxmlElement('w:t')
+            t_el.text = label
+            t_el.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+            r2.append(t_el)
+            p2.append(r2)
+            tc.append(p2)
+            return tc
+
+        def make_photo_table(photo_row):
+            n = len(photo_row)
+            col_w = W // n
+            tbl = OxmlElement('w:tbl')
+            tblPr = OxmlElement('w:tblPr')
+            tblW = OxmlElement('w:tblW')
+            tblW.set(_qn('w:w'), str(W))
+            tblW.set(_qn('w:type'), 'dxa')
+            tblPr.append(tblW)
+            tblLook = OxmlElement('w:tblLook')
+            tblLook.set(_qn('w:val'), '0000')
+            tblPr.append(tblLook)
+            tbl.append(tblPr)
+            tblGrid = OxmlElement('w:tblGrid')
+            for _ in photo_row:
+                gc = OxmlElement('w:gridCol')
+                gc.set(_qn('w:w'), str(col_w))
+                tblGrid.append(gc)
+            tbl.append(tblGrid)
+            tr = OxmlElement('w:tr')
+            for key, label, photo_data in photo_row:
+                tc = make_photo_cell(col_w, photo_data, label)
+                tr.append(tc)
+            tbl.append(tr)
+            return tbl
+
+        # Split into rows of max 3
+        rows = [active_photos[i:i+3] for i in range(0, len(active_photos), 3)]
+
+        # Insert new tables where old photo tables were
+        # insert_after_el was already removed from body, so insert at end of body or find by position
+        parent = doc.element.body
+        children_list = list(parent)
+        # Find the PROJECT INFORMATION section to insert before it
+        idx = len(children_list) - 1  # default to end
+        for i, child in enumerate(children_list):
+            if child.tag.split('}')[-1] == 'p':
+                try:
+                    from docx.text.paragraph import Paragraph
+                    txt = Paragraph(child, doc).text.strip()
+                    if 'PROJECT INFORMATION' in txt:
+                        idx = i
+                        break
+                except: pass
+        if True:
+
+            # Add spacer paragraph
+            sp_para = OxmlElement('w:p')
+            sp_pPr = OxmlElement('w:pPr')
+            sp_spacing = OxmlElement('w:spacing')
+            sp_spacing.set(_qn('w:before'), '80')
+            sp_spacing.set(_qn('w:after'), '0')
+            sp_pPr.append(sp_spacing)
+            sp_para.append(sp_pPr)
+
+            for ri, row_photos in enumerate(rows):
+                new_tbl = make_photo_table(row_photos)
+                parent.insert(idx, new_tbl)
+                idx += 1
+                if ri < len(rows) - 1:
+                    parent.insert(idx, copy.deepcopy(sp_para))
+                    idx += 1
     # 10. Porta Potty
     if not E.get('portaPotty', False):
         for tbl in doc.tables:
