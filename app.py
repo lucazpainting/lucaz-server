@@ -451,24 +451,19 @@ def generate_proposal(E):
             try: row._element.getparent().remove(row._element)
             except: pass
 
-    # 11. Fix signature section — swap label/line order to: line then label underneath
-    sig_tbl = doc.tables[-1]
-    for col_idx in [0, 2]:
-        cell = sig_tbl.rows[0].cells[col_idx]
-        paras = list(cell.paragraphs)
-        # Current: [Name, Line, SigLabel, Line, empty, Line, Date]
-        # Target:  [Line, Name, Line, SigLabel, Line, Date]
-        # Rebuild by reordering: move label AFTER its line
-        # Simplest fix: swap each label+line pair so line comes first
-        p_elements = [p._element for p in paras]
-        # Remove all paragraphs and rebuild in correct order
-        for p_el in p_elements:
-            try: cell._element.remove(p_el)
-            except: pass
+    # 11. Fix signature section — line first, label underneath
+    sig_tbl = None
+    for tbl in doc.tables:
+        if len(tbl.rows) > 0 and len(tbl.rows[0].cells) >= 3:
+            if 'Client' in tbl.rows[0].cells[0].text or 'Signature' in tbl.rows[0].cells[0].text:
+                sig_tbl = tbl
+                break
 
-        def add_line_para(cell, space_before=80):
-            from docx.oxml import OxmlElement
-            from docx.oxml.ns import qn
+    if sig_tbl:
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+
+        def add_line_para(cell, space_before=120):
             p = OxmlElement('w:p')
             pPr = OxmlElement('w:pPr')
             pBdr = OxmlElement('w:pBdr')
@@ -491,9 +486,7 @@ def generate_proposal(E):
             p.append(r)
             cell._element.append(p)
 
-        def add_label_para(cell, text, bold=False, color='555555', size=18):
-            from docx.oxml import OxmlElement
-            from docx.oxml.ns import qn
+        def add_label_para(cell, text, bold=False):
             p = OxmlElement('w:p')
             pPr = OxmlElement('w:pPr')
             spacing = OxmlElement('w:spacing')
@@ -504,10 +497,10 @@ def generate_proposal(E):
             r = OxmlElement('w:r')
             rPr = OxmlElement('w:rPr')
             clr = OxmlElement('w:color')
-            clr.set(qn('w:val'), color)
+            clr.set(qn('w:val'), '555555')
             rPr.append(clr)
             sz = OxmlElement('w:sz')
-            sz.set(qn('w:val'), str(size))
+            sz.set(qn('w:val'), '18')
             rPr.append(sz)
             fn = OxmlElement('w:rFonts')
             fn.set(qn('w:ascii'), 'Calibri')
@@ -523,25 +516,24 @@ def generate_proposal(E):
             p.append(r)
             cell._element.append(p)
 
-        # Build: Line → "Client Name" or "Contractor" (bold)
-        #        Line → "Client Signature" or "Authorized Signature"
-        #        (space)
-        #        Line → "Date"
-        if col_idx == 0:
-            add_line_para(cell, space_before=120)
-            add_label_para(cell, 'Client Name', bold=True)
-            add_line_para(cell, space_before=160)
-            add_label_para(cell, 'Client Signature')
-            add_line_para(cell, space_before=200)
+        sig_configs = [
+            (0, 'Client Name', 'Client Signature'),
+            (2, 'Contractor', 'Authorized Signature')
+        ]
+        for col_idx, name_label, sig_label in sig_configs:
+            if col_idx >= len(sig_tbl.rows[0].cells):
+                continue
+            cell = sig_tbl.rows[0].cells[col_idx]
+            # Remove all existing paragraphs
+            for p_el in list(cell._element.findall(qn('w:p'))):
+                cell._element.remove(p_el)
+            # Rebuild: Line → Label → Line → Label → Line → Date
+            add_line_para(cell, 120)
+            add_label_para(cell, name_label, bold=True)
+            add_line_para(cell, 160)
+            add_label_para(cell, sig_label)
+            add_line_para(cell, 200)
             add_label_para(cell, 'Date')
-        else:
-            add_line_para(cell, space_before=120)
-            add_label_para(cell, 'Contractor', bold=True)
-            add_line_para(cell, space_before=160)
-            add_label_para(cell, 'Authorized Signature')
-            add_line_para(cell, space_before=200)
-            add_label_para(cell, 'Date')
-
     # 10. Porta Potty
     if not E.get('portaPotty', False):
         for tbl in doc.tables:
