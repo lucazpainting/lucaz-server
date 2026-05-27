@@ -57,10 +57,12 @@ def get_or_create_folder(token, name, parent_id=None):
 def save_to_drive(doc_bytes, file_name, client_name, status='Active', existing_file_id=None):
     """Save or update proposal in Drive"""
     try:
+        print(f'DRIVE: Getting token...', flush=True)
         token = get_drive_token()
-        # Use hardcoded folder IDs directly — no searching needed
+        print(f'DRIVE: Token ok, finding/creating client folder for {client_name} in {status}...', flush=True)
         status_id = STATUS_FOLDER_IDS.get(status, STATUS_FOLDER_IDS['Active'])
         client_id = get_or_create_folder(token, client_name, status_id)
+        print(f'DRIVE: Client folder id={client_id}', flush=True)
 
         mimetype = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 
@@ -842,6 +844,7 @@ def generate():
 
         # Save to Drive server-side
         drive_file_id = save_to_drive(doc_bytes, filename, client_name_raw, status, existing_file_id)
+        print(f'DRIVE SAVE: client={client_name_raw} status={status} file_id={drive_file_id}', flush=True)
 
         # Send file back to client for download
         response = send_file(
