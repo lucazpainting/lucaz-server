@@ -15,6 +15,11 @@ SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(__file__), 'service_account.
 SCOPES = ['https://www.googleapis.com/auth/drive']
 PROPOSALS_FOLDER_NAME = 'Proposals'
 PROPOSALS_FOLDER_ID = '1MQA2U0eaEBM0w_T75-pHaYyO55T2d5nY'
+STATUS_FOLDER_IDS = {
+    'Active': '1qcWcpTDiY6gQDJlDhr76cNh9R5qD38dG',
+    'Completed': '1gqxIiZN7i8ts-D0b0B98INm6sxa8vWTp',
+    'Rejected': '14JZv7q4lRk2I2A-5tk3FEwJI5-beCXjx'
+}
 
 def get_drive_token():
     """Get a fresh access token for the service account"""
@@ -53,9 +58,8 @@ def save_to_drive(doc_bytes, file_name, client_name, status='Active', existing_f
     """Save or update proposal in Drive"""
     try:
         token = get_drive_token()
-        # Use hardcoded Proposals folder ID directly
-        proposals_id = PROPOSALS_FOLDER_ID
-        status_id = get_or_create_folder(token, status, proposals_id)
+        # Use hardcoded folder IDs directly — no searching needed
+        status_id = STATUS_FOLDER_IDS.get(status, STATUS_FOLDER_IDS['Active'])
         client_id = get_or_create_folder(token, client_name, status_id)
 
         mimetype = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
@@ -99,9 +103,10 @@ def move_drive_file(file_id, old_status, new_status):
     """Move file between status folders"""
     try:
         token = get_drive_token()
-        proposals_id = PROPOSALS_FOLDER_ID
-        old_folder_id = get_or_create_folder(token, old_status, proposals_id)
-        new_folder_id = get_or_create_folder(token, new_status, proposals_id)
+        old_folder_id = STATUS_FOLDER_IDS.get(old_status)
+        new_folder_id = STATUS_FOLDER_IDS.get(new_status)
+        if not old_folder_id or not new_folder_id:
+            return False
         res = drive_request('PATCH',
             f'https://www.googleapis.com/drive/v3/files/{file_id}',
             token,
@@ -879,9 +884,9 @@ def test_drive():
         token = get_drive_token()
         if not token:
             return jsonify({'success': False, 'error': 'Could not get access token'})
-        # Use hardcoded Proposals folder ID
+        # Use hardcoded folder IDs
         proposals_id = PROPOSALS_FOLDER_ID
-        active_id = get_or_create_folder(token, 'Active', proposals_id)
+        active_id = STATUS_FOLDER_IDS.get('Active')
         return jsonify({
             'success': True,
             'message': 'Drive connected successfully',
