@@ -507,52 +507,72 @@ def generate_proposal(E):
                         img_buf = io.BytesIO(img_bytes)
                         if cell.paragraphs:
                             first_para = cell.paragraphs[0]
+                            # Clear ALL runs and text completely
                             for run in first_para.runs:
                                 run.text = ''
+                            # Also clear any raw text nodes
+                            from docx.oxml.ns import qn as _qn
+                            for t_el in first_para._element.findall(f'.//{_qn("w:t")}'):
+                                t_el.text = ''
+                            # Add image
                             run = first_para.add_run()
                             run.add_picture(img_buf, width=Inches(1.9))
                     except Exception as pe:
                         print(f'Photo error: {pe}')
 
-    # Now remove any photo table that has NO images at all
-    # Check by looking for drawing elements (images) in the table
-    tables_to_remove = []
-    for tbl in doc.tables:
-        # Check if this is a photo table
-        has_placeholder = any(
-            '[ Insert Photo Here ]' in cell.text
+    # Clean up photo cells — hide cells with no photo by clearing content and borders
+    ns = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+    
+    for tbl in list(doc.tables):
+        is_photo_table = any(
+            any('[ Insert Photo Here ]' in para.text for para in cell.paragraphs)
             for row in tbl.rows for cell in row.cells
-        )
-        if not has_placeholder:
+        ) or any(row._element.find(f'.//{{{ns}}}blip') is not None for row in tbl.rows)
+        
+        if not is_photo_table:
             continue
-        # Check if table has any embedded images
-        ns = 'http://schemas.openxmlformats.org/drawingml/2006/main'
-        has_image = tbl._element.find(f'.//{{{ns}}}blip') is not None
-        if not has_image:
-            tables_to_remove.append(tbl)
-
-    for tbl in tables_to_remove:
-        try: tbl._element.getparent().remove(tbl._element)
-        except: pass
-
-    # For photo tables that DO have some images — remove rows where NO cell has an image
-    for tbl in doc.tables:
-        has_placeholder = any(
-            '[ Insert Photo Here ]' in cell.text
-            for row in tbl.rows for cell in row.cells
-        )
-        if not has_placeholder:
-            continue
-        ns = 'http://schemas.openxmlformats.org/drawingml/2006/main'
-        rows_to_remove = []
-        for row in tbl.rows:
-            row_has_image = row._element.find(f'.//{{{ns}}}blip') is not None
-            row_has_placeholder = any('[ Insert Photo Here ]' in cell.text for cell in row.cells)
-            if row_has_placeholder and not row_has_image:
-                rows_to_remove.append(row)
-        for row in rows_to_remove:
-            try: row._element.getparent().remove(row._element)
+        
+        table_has_any_image = tbl._element.find(f'.//{{{ns}}}blip') is not None
+        
+        if not table_has_any_image:
+            # Entire table has no photos — remove it
+            try: tbl._element.getparent().remove(tbl._element)
             except: pass
+            continue
+        
+        # Table has some images — clear empty cells
+        for row in tbl.rows:
+            for cell in row.cells:
+                cell_has_image = cell._element.find(f'.//{{{ns}}}blip') is not None
+                cell_has_placeholder = any('[ Insert Photo Here ]' in para.text for para in cell.paragraphs)
+                if cell_has_placeholder and not cell_has_image:
+                    # Clear all content from this cell
+                    for para in cell.paragraphs:
+                        for run in para.runs:
+                            run.text = ''
+                        for t_el in para._element.findall(f'.//{qn("w:t")}'):
+                            t_el.text = ''
+                    # Remove cell borders so it's invisible
+                    tcPr = cell._element.find(qn('w:tcPr'))
+                    if tcPr is None:
+                        tcPr = OxmlElement('w:tcPr')
+                        cell._element.insert(0, tcPr)
+                    tcBorders = OxmlElement('w:tcBorders')
+                    for side in ['top','bottom','left','right','insideH','insideV']:
+                        b = OxmlElement(f'w:{side}')
+                        b.set(qn('w:val'), 'nil')
+                        tcBorders.append(b)
+                    existing = tcPr.find(qn('w:tcBorders'))
+                    if existing is not None: tcPr.remove(existing)
+                    tcPr.append(tcBorders)
+                    # Set background to white
+                    shd = tcPr.find(qn('w:shd'))
+                    if shd is None:
+                        shd = OxmlElement('w:shd')
+                        tcPr.append(shd)
+                    shd.set(qn('w:val'), 'clear')
+                    shd.set(qn('w:color'), 'auto')
+                    shd.set(qn('w:fill'), 'FFFFFF')
     # 10. Porta Potty
     if not E.get('portaPotty', False):
         for tbl in doc.tables:
