@@ -109,7 +109,9 @@ def save_to_drive(doc_bytes, file_name, client_name, status='Active', existing_f
                 headers={'Content-Type': f'multipart/related; boundary={boundary}'},
                 data=body
             )
-            return res.json().get('id')
+            result = res.json()
+            print(f'DRIVE UPLOAD RESULT: {result}', flush=True)
+            return result.get('id')
     except Exception as e:
         print(f'Drive save error: {e}')
         import traceback; traceback.print_exc()
