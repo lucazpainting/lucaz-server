@@ -402,16 +402,22 @@ def generate_proposal(E):
                                 para.runs[0].text = custom_label
                                 for r in para.runs[1:]: r.text = ''
 
+    # Find photo tables and process them
+    photo_tables_to_remove = []
     for tbl in doc.tables:
-        rows_to_remove = []
-        for row in tbl.rows:
-            has_any_photo = False
-            cells_to_remove = []
+        is_photo_table = any(
+            '[ Insert Photo Here ]' in cell.text
+            for row in tbl.rows
+            for cell in row.cells
+        )
+        if not is_photo_table:
+            continue
 
+        has_any_photo_in_table = False
+        for row in tbl.rows:
             for cell in row.cells:
                 if '[ Insert Photo Here ]' not in cell.text:
                     continue
-                # Find label
                 label = ''
                 for para in cell.paragraphs:
                     if '[ Insert Photo Here ]' not in para.text and para.text.strip():
@@ -419,9 +425,8 @@ def generate_proposal(E):
                         break
                 photo_key = label_to_key.get(label) or label
                 photo_data = photos.get(photo_key) if photo_key else None
-
                 if photo_data and photo_data.startswith('data:image'):
-                    has_any_photo = True
+                    has_any_photo_in_table = True
                     try:
                         header, b64 = photo_data.split(',', 1)
                         img_bytes = base64.b64decode(b64)
@@ -434,22 +439,14 @@ def generate_proposal(E):
                             run.add_picture(img_buf, width=Inches(1.9))
                     except Exception as photo_err:
                         print(f'Photo embed error: {photo_err}')
-                else:
-                    cells_to_remove.append(cell)
 
-            if not has_any_photo:
-                # No photos in entire row — remove the row
-                rows_to_remove.append(row)
-            else:
-                # Some cells empty — clear their content so they show blank
-                for cell in cells_to_remove:
-                    for para in cell.paragraphs:
-                        for run in para.runs:
-                            run.text = ''
+        if not has_any_photo_in_table:
+            photo_tables_to_remove.append(tbl)
 
-        for row in rows_to_remove:
-            try: row._element.getparent().remove(row._element)
-            except: pass
+    # Remove entire photo tables that have no photos
+    for tbl in photo_tables_to_remove:
+        try: tbl._element.getparent().remove(tbl._element)
+        except: pass
 
     # 11. Fix signature section — line first, label underneath
     sig_tbl = None
@@ -524,16 +521,26 @@ def generate_proposal(E):
             if col_idx >= len(sig_tbl.rows[0].cells):
                 continue
             cell = sig_tbl.rows[0].cells[col_idx]
-            # Remove all existing paragraphs
-            for p_el in list(cell._element.findall(qn('w:p'))):
-                cell._element.remove(p_el)
-            # Rebuild: Line → Label → Line → Label → Line → Date
-            add_line_para(cell, 120)
-            add_label_para(cell, name_label, bold=True)
-            add_line_para(cell, 160)
-            add_label_para(cell, sig_label)
-            add_line_para(cell, 200)
-            add_label_para(cell, 'Date')
+            # Clear text from existing paragraphs, keep structure
+            for para in cell.paragraphs:
+                for run in para.runs:
+                    run.text = ''
+            # Just update the label text in existing paragraphs
+            paras = [p for p in cell.paragraphs]
+            labels = [name_label, sig_label, 'Date']
+            label_idx = 0
+            for para in paras:
+                txt = para.text.strip()
+                # If paragraph has a border (it's a line), skip
+                pb = para._element.find(qn('w:pBdr'))
+                if pb is not None:
+                    continue
+                # It's a label paragraph — set the text
+                if label_idx < len(labels):
+                    if not para.runs:
+                        run = para.add_run()
+                    para.runs[0].text = labels[label_idx]
+                    label_idx += 1
     # 10. Porta Potty
     if not E.get('portaPotty', False):
         for tbl in doc.tables:
