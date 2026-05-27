@@ -1,10 +1,10 @@
-from flask import Flask, request, send_file, jsonify
+from flask import Flask, request as flask_request, send_file, jsonify
 from flask_cors import CORS
 from docx import Document
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 import copy, io, os, json, time
-import requests
+import requests as http_requests
 from google.oauth2 import service_account
 
 app = Flask(__name__)
@@ -28,7 +28,7 @@ def drive_request(method, url, token, **kwargs):
     """Make an authenticated Drive API request"""
     headers = kwargs.pop('headers', {})
     headers['Authorization'] = f'Bearer {token}'
-    return requests.request(method, url, headers=headers, **kwargs)
+    return http_requests.request(method, url, headers=headers, **kwargs)
 
 def get_or_create_folder(token, name, parent_id=None):
     """Find folder by name, create if not exists"""
@@ -557,10 +557,10 @@ def generate_proposal(E):
 
 @app.route('/generate', methods=['POST', 'OPTIONS'])
 def generate():
-    if request.method == 'OPTIONS':
+    if flask_request.method == 'OPTIONS':
         return '', 200
     try:
-        E = request.get_json()
+        E = flask_request.get_json()
         if not E:
             return jsonify({'error': 'No data provided'}), 400
         buf = generate_proposal(E)
@@ -593,10 +593,10 @@ def generate():
 @app.route('/move', methods=['POST', 'OPTIONS'])
 def move():
     """Move a file between status folders in Drive"""
-    if request.method == 'OPTIONS':
+    if flask_request.method == 'OPTIONS':
         return '', 200
     try:
-        data = request.get_json()
+        data = flask_request.get_json()
         file_id = data.get('fileId')
         old_status = data.get('oldStatus')
         new_status = data.get('newStatus')
