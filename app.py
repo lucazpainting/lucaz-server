@@ -555,6 +555,35 @@ def generate_proposal(E):
     buf.seek(0)
     return buf
 
+@app.route('/test-generate', methods=['GET'])
+def test_generate():
+    try:
+        E = {
+            'proposalNum': '0001',
+            'dateIssued': '05/26/2026',
+            'subject': 'Test',
+            'client': {'name':'Test Client','street':'123 Main St','city':'Ossining','state':'NY','zip':'10562','phone':'(914) 555-0000','email':'test@test.com'},
+            'powerWash': ['Full house exterior power wash — all sides'],
+            'surfacePrep': ['Scraping and sanding of all peeling or flaking paint'],
+            'sides': [{'label':'Front','surfaces':[{'name':'Siding — Clapboard','qty':None,'paint':'Regal Select 100% Acrylic','sheen':'Flat','color':'Color match','pc':2,'prc':0}]}],
+            'carpentry': {'enabled': False},
+            'portaPotty': False,
+            'duration': '5-7 days',
+            'photos': {},
+            'subtotal': '$1,000.00',
+            'salesTaxAmt': '$83.75',
+            'total': '$1,083.75',
+            'deposit': '$361.25',
+            'balance': '$722.50'
+        }
+        buf = generate_proposal(E)
+        return jsonify({'success': True, 'size': len(buf.read())})
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print('TEST-GENERATE ERROR:\n' + tb, flush=True)
+        return jsonify({'success': False, 'error': str(e), 'trace': tb})
+
 @app.route('/generate', methods=['POST', 'OPTIONS'])
 def generate():
     if flask_request.method == 'OPTIONS':
@@ -588,7 +617,9 @@ def generate():
         return response
     except Exception as e:
         import traceback
-        return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
+        tb = traceback.format_exc()
+        print('GENERATE ERROR:\n' + tb, flush=True)
+        return jsonify({'error': str(e), 'trace': tb}), 500
 
 @app.route('/move', methods=['POST', 'OPTIONS'])
 def move():
