@@ -114,25 +114,75 @@ def save_to_drive(doc_bytes, file_name, client_name, status='Active', existing_f
         import traceback; traceback.print_exc()
         return None
 
-def move_drive_file(file_id, old_status, new_status):
-    """Move file between status folders"""
+def move_drive_file(file_id, old_status, new_status, client_name=None):
+    """Move file between status folders, maintaining client subfolder structure"""
     try:
         token = get_drive_token()
         if not token:
             return False
-        old_id = STATUS_FOLDER_IDS.get(old_status)
-        new_id = STATUS_FOLDER_IDS.get(new_status)
-        if not old_id or not new_id:
+        old_status_id = STATUS_FOLDER_IDS.get(old_status)
+        new_status_id = STATUS_FOLDER_IDS.get(new_status)
+        if not old_status_id or not new_status_id:
             return False
+
+        # Find the file's current parent (client folder)
+        res = http_requests.get(
+            f'https://www.googleapis.com/drive/v3/files/{file_id}',
+            headers={'Authorization': f'Bearer {token}'},
+            params={'fields': 'id,name,parents'}
+        )
+        file_data = res.json()
+        current_parents = file_data.get('parents', [])
+
+        # Find or create client folder in destination
+        if client_name:
+            new_client_id = get_or_create_folder(token, client_name, new_status_id)
+        else:
+            # Try to get client name from current parent folder name
+            old_client_id = next((p for p in current_parents if p != old_status_id), None)
+            if old_client_id:
+                folder_res = http_requests.get(
+                    f'https://www.googleapis.com/drive/v3/files/{old_client_id}',
+                    headers={'Authorization': f'Bearer {token}'},
+                    params={'fields': 'name'}
+                )
+                folder_name = folder_res.json().get('name', 'Client')
+                new_client_id = get_or_create_folder(token, folder_name, new_status_id)
+            else:
+                new_client_id = new_status_id
+
+        # Move file to new client folder
+        remove_parents = ','.join(current_parents) if current_parents else old_status_id
         res = http_requests.patch(
             f'https://www.googleapis.com/drive/v3/files/{file_id}',
             headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
-            params={'addParents': new_id, 'removeParents': old_id, 'fields': 'id'},
+            params={'addParents': new_client_id, 'removeParents': remove_parents, 'fields': 'id'},
             json={}
         )
-        return 'id' in res.json()
+        success = 'id' in res.json()
+
+        # Delete empty client folders in old status
+        if success and current_parents:
+            for parent_id in current_parents:
+                if parent_id == old_status_id:
+                    continue
+                # Check if folder is now empty
+                check = http_requests.get(
+                    'https://www.googleapis.com/drive/v3/files',
+                    headers={'Authorization': f'Bearer {token}'},
+                    params={'q': f"'{parent_id}' in parents and trashed=false", 'fields': 'files(id)'}
+                )
+                if not check.json().get('files'):
+                    http_requests.delete(
+                        f'https://www.googleapis.com/drive/v3/files/{parent_id}',
+                        headers={'Authorization': f'Bearer {token}'}
+                    )
+
+        return success
     except Exception as e:
         print(f'Move error: {e}', flush=True)
+        import traceback; traceback.print_exc()
+        return False
         return False
 
 # ── OAUTH ENDPOINTS ──
@@ -699,7 +749,7 @@ def move():
         return '', 200
     try:
         data = flask_request.get_json()
-        success = move_drive_file(data.get('fileId'), data.get('oldStatus'), data.get('newStatus'))
+        success = move_drive_file(data.get('fileId'), data.get('oldStatus'), data.get('newStatus'), data.get('clientName'))
         return jsonify({'success': success})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
