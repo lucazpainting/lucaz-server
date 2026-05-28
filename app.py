@@ -631,11 +631,11 @@ def generate_proposal(E):
             for p_el in list(cell._element.findall(qn('w:p'))):
                 cell._element.remove(p_el)
             cell._element.append(make_sig_label(''))
-            cell._element.append(make_sig_line(120))
+            cell._element.append(make_sig_line(200))
             cell._element.append(make_sig_label(name_lbl, bold=True))
-            cell._element.append(make_sig_line(180))
+            cell._element.append(make_sig_line(320))
             cell._element.append(make_sig_label(sig_lbl))
-            cell._element.append(make_sig_line(180))
+            cell._element.append(make_sig_line(320))
             cell._element.append(make_sig_label('Date'))
 
     buf = io.BytesIO()
