@@ -7,7 +7,7 @@ import copy, io, os, json, time
 import requests as http_requests
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, expose_headers=['X-Drive-File-Id'])
 
 # ── CONFIG ──
 TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'EXTERIOR_MASTER_TEMPLATE.docx')
