@@ -323,24 +323,10 @@ def generate_proposal(E):
         if i < len(bps) and bps[i].runs:
             for r in bps[i].runs: r.text = ''
             bps[i].runs[0].text = item
-    # Clear and hide unused bullet paragraphs
+    # Remove unused bullet paragraphs completely
     for i in range(len(pw_items), len(bps)):
-        p_el = bps[i]._element
-        for r in p_el.findall(qn('w:r')):
-            t = r.find(qn('w:t'))
-            if t is not None: t.text = ''
-        # Remove bullet formatting so it's invisible
-        pPr = p_el.find(qn('w:pPr'))
-        if pPr is not None:
-            numPr = pPr.find(qn('w:numPr'))
-            if numPr is not None: pPr.remove(numPr)
-        # Set zero spacing
-        if pPr is None:
-            pPr = OxmlElement('w:pPr'); p_el.insert(0, pPr)
-        sp = pPr.find(qn('w:spacing'))
-        if sp is None:
-            sp = OxmlElement('w:spacing'); pPr.append(sp)
-        sp.set(qn('w:before'), '0'); sp.set(qn('w:after'), '0')
+        try: bps[i]._element.getparent().remove(bps[i]._element)
+        except: pass
 
     # 5. Surface prep bullets
     sp_cell = doc.tables[2].rows[0].cells[0]
@@ -351,20 +337,8 @@ def generate_proposal(E):
             for r in sps[i].runs: r.text = ''
             sps[i].runs[0].text = item
     for i in range(len(sp_items), len(sps)):
-        p_el = sps[i]._element
-        for r in p_el.findall(qn('w:r')):
-            t = r.find(qn('w:t'))
-            if t is not None: t.text = ''
-        pPr = p_el.find(qn('w:pPr'))
-        if pPr is not None:
-            numPr = pPr.find(qn('w:numPr'))
-            if numPr is not None: pPr.remove(numPr)
-        if pPr is None:
-            pPr = OxmlElement('w:pPr'); p_el.insert(0, pPr)
-        sp2 = pPr.find(qn('w:spacing'))
-        if sp2 is None:
-            sp2 = OxmlElement('w:spacing'); pPr.append(sp2)
-        sp2.set(qn('w:before'), '0'); sp2.set(qn('w:after'), '0')
+        try: sps[i]._element.getparent().remove(sps[i]._element)
+        except: pass
 
     # 6. Rebuild paint tables
     for side in sides_data:
