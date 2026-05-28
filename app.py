@@ -241,6 +241,16 @@ def rebuild_paint_table(tbl, surfaces):
             if shd is not None:
                 shd.set(qn('w:fill'), fill)
                 shd.set(qn('w:color'), 'auto')
+            # Reset text color to black for data rows
+            for run in tc.findall(f'.//{qn("w:r")}'):
+                rpr = run.find(qn('w:rPr'))
+                if rpr is not None:
+                    clr = rpr.find(qn('w:color'))
+                    if clr is not None:
+                        clr.set(qn('w:val'), '000000')
+                    # Remove bold from data rows
+                    b = rpr.find(qn('w:b'))
+                    if b is not None: rpr.remove(b)
         tbl._element.append(new_row)
         vals = [nm, sf.get('paint',''), sf.get('sheen',''), sf.get('color','TBD'), f"{sf.get('pc',2)} / {sf.get('prc',0)}"]
         for ci, val in enumerate(vals):
@@ -308,26 +318,53 @@ def generate_proposal(E):
     # 4. Power wash bullets
     pw_cell = doc.tables[1].rows[0].cells[0]
     bps = [p for p in pw_cell.paragraphs if p.text.strip() and 'Power Washing' not in p.text]
-    pw_items = E.get('powerWash', [])
+    pw_items = [x for x in E.get('powerWash', []) if x.strip()]
     for i, item in enumerate(pw_items):
         if i < len(bps) and bps[i].runs:
             for r in bps[i].runs: r.text = ''
             bps[i].runs[0].text = item
+    # Clear and hide unused bullet paragraphs
     for i in range(len(pw_items), len(bps)):
-        if bps[i].runs:
-            for r in bps[i].runs: r.text = ''
+        p_el = bps[i]._element
+        for r in p_el.findall(qn('w:r')):
+            t = r.find(qn('w:t'))
+            if t is not None: t.text = ''
+        # Remove bullet formatting so it's invisible
+        pPr = p_el.find(qn('w:pPr'))
+        if pPr is not None:
+            numPr = pPr.find(qn('w:numPr'))
+            if numPr is not None: pPr.remove(numPr)
+        # Set zero spacing
+        if pPr is None:
+            pPr = OxmlElement('w:pPr'); p_el.insert(0, pPr)
+        sp = pPr.find(qn('w:spacing'))
+        if sp is None:
+            sp = OxmlElement('w:spacing'); pPr.append(sp)
+        sp.set(qn('w:before'), '0'); sp.set(qn('w:after'), '0')
 
     # 5. Surface prep bullets
     sp_cell = doc.tables[2].rows[0].cells[0]
     sps = [p for p in sp_cell.paragraphs if p.text.strip() and 'Surface Preparation' not in p.text]
-    sp_items = E.get('surfacePrep', [])
+    sp_items = [x for x in E.get('surfacePrep', []) if x.strip()]
     for i, item in enumerate(sp_items):
         if i < len(sps) and sps[i].runs:
             for r in sps[i].runs: r.text = ''
             sps[i].runs[0].text = item
     for i in range(len(sp_items), len(sps)):
-        if sps[i].runs:
-            for r in sps[i].runs: r.text = ''
+        p_el = sps[i]._element
+        for r in p_el.findall(qn('w:r')):
+            t = r.find(qn('w:t'))
+            if t is not None: t.text = ''
+        pPr = p_el.find(qn('w:pPr'))
+        if pPr is not None:
+            numPr = pPr.find(qn('w:numPr'))
+            if numPr is not None: pPr.remove(numPr)
+        if pPr is None:
+            pPr = OxmlElement('w:pPr'); p_el.insert(0, pPr)
+        sp2 = pPr.find(qn('w:spacing'))
+        if sp2 is None:
+            sp2 = OxmlElement('w:spacing'); pPr.append(sp2)
+        sp2.set(qn('w:before'), '0'); sp2.set(qn('w:after'), '0')
 
     # 6. Rebuild paint tables
     for side in sides_data:
