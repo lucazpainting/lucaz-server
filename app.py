@@ -600,11 +600,12 @@ def generate_proposal(E):
             # Add image via temp paragraph on actual doc
             tmp = doc_ref.add_paragraph()
             tmp.alignment = 1
-            if pd and pd.startswith('data:image'):
+            if pd:
                 try:
-                    _, b64 = pd.split(',', 1)
-                    run = tmp.add_run()
-                    run.add_picture(io.BytesIO(base64.b64decode(b64)), width=Inches(min(2.3, width/1440.0)))
+                    img_bytes = get_photo_bytes(pd)
+                    if img_bytes:
+                        run = tmp.add_run()
+                        run.add_picture(io.BytesIO(img_bytes), width=Inches(min(2.3, width/1440.0)))
                 except Exception as e:
                     print(f'Photo error: {e}', flush=True)
             pPr = tmp._element.find(qn('w:pPr'))
@@ -748,6 +749,33 @@ def _make_page_field(ref_run_el):
     return [r1, r2, r3]
 
 
+def get_photo_bytes(photo_ref):
+    """Get image bytes from either a base64 data URL or a Drive file ID"""
+    if not photo_ref:
+        return None
+    if photo_ref.startswith('data:image'):
+        try:
+            _, b64 = photo_ref.split(',', 1)
+            return base64.b64decode(b64)
+        except:
+            return None
+    else:
+        # It's a Drive file ID
+        try:
+            token = get_drive_token()
+            if not token:
+                return None
+            res = http_requests.get(
+                f'https://www.googleapis.com/drive/v3/files/{photo_ref}',
+                headers={'Authorization': f'Bearer {token}'},
+                params={'alt': 'media'}
+            )
+            if res.status_code == 200:
+                return res.content
+        except Exception as e:
+            print(f'Photo download error: {e}', flush=True)
+        return None
+
 # ── ROUTES ──
 @app.route('/generate', methods=['POST', 'OPTIONS'])
 def generate():
@@ -832,6 +860,101 @@ def test_drive():
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({'status': 'ok', 'template': os.path.exists(TEMPLATE_PATH), 'drive_auth': os.path.exists(TOKEN_FILE)})
+
+@app.route('/upload-photo', methods=['POST', 'OPTIONS'])
+def upload_photo():
+    """Upload a photo to Drive and return the file ID"""
+    if flask_request.method == 'OPTIONS':
+        return '', 200
+    try:
+        token = get_drive_token()
+        if not token:
+            return jsonify({'error': 'Not authorized'}), 401
+        data = flask_request.get_json()
+        if not data:
+            return jsonify({'error': 'No data'}), 400
+        photo_data = data.get('photoData')  # base64 data URL
+        client_name = data.get('clientName', 'Unknown')
+        slot_label = data.get('slotLabel', 'Photo')
+        if not photo_data or not photo_data.startswith('data:image'):
+            return jsonify({'error': 'Invalid photo data'}), 400
+        # Decode image
+        import base64
+        header, b64 = photo_data.split(',', 1)
+        img_bytes = base64.b64decode(b64)
+        # Determine mime type
+        mime = 'image/jpeg'
+        if 'png' in header: mime = 'image/png'
+        # Get or create Photos folder under client
+        status_id = STATUS_FOLDER_IDS.get('Active')
+        client_id = get_or_create_folder(token, client_name, status_id)
+        photos_id = get_or_create_folder(token, 'Photos', client_id)
+        # Upload photo
+        boundary = f'photo_{int(time.time())}'
+        ext = 'jpg' if mime == 'image/jpeg' else 'png'
+        file_name = f'{slot_label}_{int(time.time())}.{ext}'
+        meta = json.dumps({'name': file_name, 'parents': [photos_id]})
+        body = (
+            f'--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'
+            f'{meta}\r\n--{boundary}\r\nContent-Type: {mime}\r\n\r\n'
+        ).encode() + img_bytes + f'\r\n--{boundary}--'.encode()
+        res = http_requests.post(
+            'https://www.googleapis.com/upload/drive/v3/files',
+            headers={'Authorization': f'Bearer {token}', 'Content-Type': f'multipart/related; boundary={boundary}'},
+            params={'uploadType': 'multipart', 'fields': 'id'},
+            data=body
+        )
+        result = res.json()
+        print(f'PHOTO UPLOAD: {result}', flush=True)
+        file_id = result.get('id')
+        if not file_id:
+            return jsonify({'error': 'Upload failed', 'detail': result}), 500
+        return jsonify({'success': True, 'fileId': file_id})
+    except Exception as e:
+        import traceback
+        print('PHOTO UPLOAD ERROR:', traceback.format_exc(), flush=True)
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/photo/<file_id>', methods=['GET'])
+def get_photo(file_id):
+    """Serve a photo from Drive"""
+    try:
+        token = get_drive_token()
+        if not token:
+            return jsonify({'error': 'Not authorized'}), 401
+        res = http_requests.get(
+            f'https://www.googleapis.com/drive/v3/files/{file_id}',
+            headers={'Authorization': f'Bearer {token}'},
+            params={'alt': 'media'},
+            stream=True
+        )
+        if res.status_code != 200:
+            return jsonify({'error': 'Photo not found'}), 404
+        from flask import Response
+        return Response(
+            res.content,
+            mimetype=res.headers.get('Content-Type', 'image/jpeg'),
+            headers={'Cache-Control': 'max-age=3600', 'Access-Control-Allow-Origin': '*'}
+        )
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/delete-photo/<file_id>', methods=['DELETE', 'OPTIONS'])
+def delete_photo(file_id):
+    """Delete a photo from Drive"""
+    if flask_request.method == 'OPTIONS':
+        return '', 200
+    try:
+        token = get_drive_token()
+        if not token:
+            return jsonify({'error': 'Not authorized'}), 401
+        http_requests.delete(
+            f'https://www.googleapis.com/drive/v3/files/{file_id}',
+            headers={'Authorization': f'Bearer {token}'}
+        )
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
