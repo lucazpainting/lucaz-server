@@ -626,10 +626,15 @@ def generate_proposal(E):
         lbl = photo_labels.get(key) or f"{side['label']} side"
         if pd and (pd.startswith('data:image') or (len(pd) < 100 and not pd.startswith('data:'))):
             active_photos.append((key, lbl, pd))
-    for slot_key in ['add1','add2','add3']:
-        pd = photos.get(slot_key)
-        lbl = photo_labels.get(slot_key) or f'Additional {slot_key[-1]}'
-        if pd and pd.startswith('data:image'):
+    # Collect all additional photos — any key not already used as a side photo
+    side_keys_used = {s['label'] for s in sides_data}
+    for slot_key, pd in photos.items():
+        if slot_key in side_keys_used:
+            continue
+        if not pd:
+            continue
+        if pd.startswith('data:image') or (len(pd) < 100 and not pd.startswith('data:')):
+            lbl = photo_labels.get(slot_key) or slot_key.replace('_',' ').title()
             active_photos.append((slot_key, lbl, pd))
 
     # Remove existing photo tables
