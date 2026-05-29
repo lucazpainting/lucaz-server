@@ -979,14 +979,19 @@ def upload_photo():
         # Determine mime type
         mime = 'image/jpeg'
         if 'png' in header: mime = 'image/png'
-        # Get or create job folder — use jobFolderId if provided, else fall back to Photos under client
+        # Get or create job folder — use jobFolderId if provided, else create from proposal info
         job_folder_id = data.get('jobFolderId')
         if job_folder_id:
             photos_id = get_or_create_folder(token, 'Photos', job_folder_id)
         else:
+            # Create job folder structure from proposal info
+            proposal_num = data.get('proposalNum', '----')
+            date_issued = data.get('dateIssued', 'Unknown')
             status_id = STATUS_FOLDER_IDS.get('Active')
             client_id = get_or_create_folder(token, client_name, status_id)
-            photos_id = get_or_create_folder(token, 'Photos', client_id)
+            job_folder_name = f"Job #{proposal_num} - {date_issued}"
+            job_id = get_or_create_folder(token, job_folder_name, client_id)
+            photos_id = get_or_create_folder(token, 'Photos', job_id or client_id)
         # Upload photo
         boundary = f'photo_{int(time.time())}'
         ext = 'jpg' if mime == 'image/jpeg' else 'png'
@@ -1007,7 +1012,9 @@ def upload_photo():
         file_id = result.get('id')
         if not file_id:
             return jsonify({'error': 'Upload failed', 'detail': result}), 500
-        return jsonify({'success': True, 'fileId': file_id})
+        # Return job folder ID so dashboard can store it for future uploads
+        returned_job_folder = job_folder_id or (job_id if not job_folder_id else None)
+        return jsonify({'success': True, 'fileId': file_id, 'jobFolderId': returned_job_folder})
     except Exception as e:
         import traceback
         print('PHOTO UPLOAD ERROR:', traceback.format_exc(), flush=True)
