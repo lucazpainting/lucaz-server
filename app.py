@@ -329,6 +329,27 @@ def remove_side_block(doc, side_label):
 
 SIDE_TABLE_IDX = {'Front': 3, 'Left': 4, 'Right': 5, 'Back': 6}
 
+def _insert_note_para(doc, tbl_el, notes, body=None, idx=None):
+    """Insert an italic note paragraph after a table element"""
+    note_para = OxmlElement('w:p')
+    pPr = OxmlElement('w:pPr')
+    sp = OxmlElement('w:spacing')
+    sp.set(qn('w:before'), '60'); sp.set(qn('w:after'), '60')
+    pPr.append(sp); note_para.append(pPr)
+    r = OxmlElement('w:r')
+    rPr = OxmlElement('w:rPr')
+    i_el = OxmlElement('w:i')
+    clr = OxmlElement('w:color'); clr.set(qn('w:val'), '555555')
+    rPr.append(i_el); rPr.append(clr); r.append(rPr)
+    t = OxmlElement('w:t')
+    t.text = f'Note: {notes}'
+    t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+    r.append(t); note_para.append(r)
+    if tbl_el is not None and body is None:
+        tbl_el.addnext(note_para)
+    elif body is not None and idx is not None:
+        body.insert(idx, note_para)
+
 def generate_proposal(E):
     doc = Document(TEMPLATE_PATH)
     sides_data = E.get('sides', [])
@@ -401,8 +422,19 @@ def generate_proposal(E):
     for sl in [s for s in all_sides if s not in active_labels]:
         remove_side_block(doc, sl)
 
-    # 8. Renumber side headings and add notes after paint tables
+    # 8. Renumber side headings, insert custom sides, add notes
     default_sides_list = ['Front', 'Left', 'Right', 'Back']
+    
+    # Find insertion point for custom sides (before PROJECT PHOTOS)
+    body = doc.element.body
+    insert_before_el = None
+    for child in list(body):
+        if child.tag.split('}')[-1] == 'p':
+            txt = get_para_text(child, doc)
+            if 'PROJECT PHOTOS' in txt:
+                insert_before_el = child
+                break
+
     for i, side in enumerate(sides_data):
         num = i + 3
         label = side['label']
@@ -415,33 +447,62 @@ def generate_proposal(E):
                     para.runs[0].text = f"{num}.  {label} of House"
                     for r in para.runs[1:]: r.text = ''
                     break
+            # Add note after paint table
+            if notes:
+                tbl_idx = SIDE_TABLE_IDX.get(label)
+                if tbl_idx is not None and tbl_idx < len(doc.tables):
+                    _insert_note_para(doc, doc.tables[tbl_idx]._element, notes)
+        else:
+            # Custom side — insert heading + paint table before photos section
+            if insert_before_el is not None:
+                idx = list(body).index(insert_before_el)
+            else:
+                idx = len(list(body))
 
-        # Add note paragraph after the paint table for this side
-        if notes:
-            tbl_idx = SIDE_TABLE_IDX.get(label)
-            if tbl_idx is not None and tbl_idx < len(doc.tables):
-                tbl_el = doc.tables[tbl_idx]._element
-                note_para = OxmlElement('w:p')
-                pPr = OxmlElement('w:pPr')
-                sp = OxmlElement('w:spacing')
-                sp.set(qn('w:before'), '60')
-                sp.set(qn('w:after'), '60')
-                pPr.append(sp)
-                note_para.append(pPr)
-                r = OxmlElement('w:r')
-                rPr = OxmlElement('w:rPr')
-                i_el = OxmlElement('w:i')
-                clr = OxmlElement('w:color')
-                clr.set(qn('w:val'), '555555')
-                rPr.append(i_el)
-                rPr.append(clr)
-                r.append(rPr)
-                t = OxmlElement('w:t')
-                t.text = f'Note: {notes}'
-                t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
-                r.append(t)
-                note_para.append(r)
-                tbl_el.addnext(note_para)
+            # Heading paragraph
+            heading = OxmlElement('w:p')
+            hPr = OxmlElement('w:pPr')
+            # Try to copy style from an existing side heading
+            for para in doc.paragraphs:
+                if 'of House' in para.text and para._element.find(qn('w:pPr')) is not None:
+                    import copy
+                    hPr = copy.deepcopy(para._element.find(qn('w:pPr')))
+                    break
+            heading.append(hPr)
+            r = OxmlElement('w:r')
+            # Copy run properties from existing heading
+            for para in doc.paragraphs:
+                if 'of House' in para.text and para.runs:
+                    import copy
+                    rPr = para.runs[0]._element.find(qn('w:rPr'))
+                    if rPr is not None:
+                        r.append(copy.deepcopy(rPr))
+                    break
+            t = OxmlElement('w:t')
+            t.text = f"{num}.  {label}"
+            t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+            r.append(t); heading.append(r)
+            body.insert(idx, heading); idx += 1
+
+            # Paint table — copy from first side table and rebuild
+            if len(doc.tables) > 3:
+                import copy
+                tbl_copy = copy.deepcopy(doc.tables[3]._element)
+                from docx.table import Table as DocxTable
+                new_tbl = DocxTable(tbl_copy, doc)
+                rebuild_paint_table(new_tbl, side.get('surfaces', []))
+                body.insert(idx, tbl_copy); idx += 1
+
+            # Add note if any
+            if notes:
+                _insert_note_para(doc, tbl_copy if len(doc.tables) > 3 else None, notes, body, idx)
+                idx += 1
+
+            # Spacer
+            spacer = OxmlElement('w:p')
+            body.insert(idx, spacer); idx += 1
+            # Update insert point
+            insert_before_el = spacer
 
     # 9. Carpentry
     if not E.get('carpentry', {}).get('enabled', False):
@@ -535,7 +596,7 @@ def generate_proposal(E):
         key = side['label']
         pd = photos.get(key)
         lbl = photo_labels.get(key) or f"{side['label']} side"
-        if pd and pd.startswith('data:image'):
+        if pd and (pd.startswith('data:image') or (len(pd) < 100 and not pd.startswith('data:'))):
             active_photos.append((key, lbl, pd))
     for slot_key in ['add1','add2','add3']:
         pd = photos.get(slot_key)
