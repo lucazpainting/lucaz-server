@@ -401,14 +401,47 @@ def generate_proposal(E):
     for sl in [s for s in all_sides if s not in active_labels]:
         remove_side_block(doc, sl)
 
-    # 8. Renumber side headings
+    # 8. Renumber side headings and add notes after paint tables
+    default_sides_list = ['Front', 'Left', 'Right', 'Back']
     for i, side in enumerate(sides_data):
         num = i + 3
-        for para in doc.paragraphs:
-            if side['label'] + ' of House' in para.text and para.runs:
-                para.runs[0].text = f"{num}.  {side['label']} of House"
-                for r in para.runs[1:]: r.text = ''
-                break
+        label = side['label']
+        notes = side.get('notes', '').strip()
+
+        if label in default_sides_list:
+            # Renumber existing heading
+            for para in doc.paragraphs:
+                if label + ' of House' in para.text and para.runs:
+                    para.runs[0].text = f"{num}.  {label} of House"
+                    for r in para.runs[1:]: r.text = ''
+                    break
+
+        # Add note paragraph after the paint table for this side
+        if notes:
+            tbl_idx = SIDE_TABLE_IDX.get(label)
+            if tbl_idx is not None and tbl_idx < len(doc.tables):
+                tbl_el = doc.tables[tbl_idx]._element
+                note_para = OxmlElement('w:p')
+                pPr = OxmlElement('w:pPr')
+                sp = OxmlElement('w:spacing')
+                sp.set(qn('w:before'), '60')
+                sp.set(qn('w:after'), '60')
+                pPr.append(sp)
+                note_para.append(pPr)
+                r = OxmlElement('w:r')
+                rPr = OxmlElement('w:rPr')
+                i_el = OxmlElement('w:i')
+                clr = OxmlElement('w:color')
+                clr.set(qn('w:val'), '555555')
+                rPr.append(i_el)
+                rPr.append(clr)
+                r.append(rPr)
+                t = OxmlElement('w:t')
+                t.text = f'Note: {notes}'
+                t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+                r.append(t)
+                note_para.append(r)
+                tbl_el.addnext(note_para)
 
     # 9. Carpentry
     if not E.get('carpentry', {}).get('enabled', False):
@@ -447,6 +480,7 @@ def generate_proposal(E):
                 break
 
     # 11. Cost table
+    tax_pct = E.get('salesTaxPct', '8.375%')
     cost_map = {
         'Subtotal': E.get('subtotal',''),
         'Sales Tax': E.get('salesTaxAmt',''),
@@ -459,6 +493,11 @@ def generate_proposal(E):
         for row in tbl.rows:
             if len(row.cells) < 2: continue
             cell0 = row.cells[0].text.strip()
+            # Update Sales Tax label with correct percentage
+            if 'Sales Tax' in cell0:
+                set_cell_text(row.cells[0], f'Sales Tax ({tax_pct})', italic=False)
+                set_cell_text(row.cells[1], E.get('salesTaxAmt',''))
+                continue
             for key, val in cost_map.items():
                 if val and key in cell0:
                     set_cell_text(row.cells[1], val)
