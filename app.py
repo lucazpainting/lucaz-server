@@ -7,7 +7,7 @@ import copy, io, os, json, time
 import requests as http_requests
 
 app = Flask(__name__)
-CORS(app, expose_headers=['X-Drive-File-Id'])
+CORS(app, expose_headers=['X-Drive-File-Id', 'X-Job-Folder-Id'])
 
 # ── CONFIG ──
 TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'EXTERIOR_MASTER_TEMPLATE.docx')
@@ -73,18 +73,25 @@ def get_or_create_folder(token, name, parent_id):
         print(f'Folder error: {e}', flush=True)
         return None
 
-def save_to_drive(doc_bytes, file_name, client_name, status='Active', existing_file_id=None):
-    """Save proposal to Drive"""
+def save_to_drive(doc_bytes, file_name, client_name, status='Active', existing_file_id=None, proposal_num=None, date_issued=None):
+    """Save proposal to Drive under Status/Client/Job #XXXX - Date/"""
     try:
         token = get_drive_token()
         if not token:
-            print('DRIVE: No token — need to auth first', flush=True)
+            print('DRIVE: No token', flush=True)
             return None
         status_id = STATUS_FOLDER_IDS.get(status, STATUS_FOLDER_IDS['Active'])
         client_id = get_or_create_folder(token, client_name, status_id)
         print(f'DRIVE: client_folder={client_id}', flush=True)
         if not client_id:
             return None
+
+        # Create job subfolder: "Job #0147 - 05-28-2026"
+        job_folder_name = f"Job #{proposal_num or '----'} - {date_issued or 'Unknown'}"
+        job_id = get_or_create_folder(token, job_folder_name, client_id)
+        if not job_id:
+            job_id = client_id  # fallback to client folder
+
         mimetype = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
         if existing_file_id:
             res = http_requests.patch(
@@ -94,8 +101,9 @@ def save_to_drive(doc_bytes, file_name, client_name, status='Active', existing_f
                 data=doc_bytes
             )
             return res.json().get('id', existing_file_id)
+
         boundary = f'lucaz_{int(time.time())}'
-        meta = json.dumps({'name': file_name, 'parents': [client_id]})
+        meta = json.dumps({'name': file_name, 'parents': [job_id]})
         body = (
             f'--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'
             f'{meta}\r\n--{boundary}\r\nContent-Type: {mimetype}\r\n\r\n'
@@ -108,14 +116,19 @@ def save_to_drive(doc_bytes, file_name, client_name, status='Active', existing_f
         )
         result = res.json()
         print(f'DRIVE UPLOAD: {result}', flush=True)
-        return result.get('id')
+        # Store job folder ID too so photos go in same folder
+        file_id = result.get('id')
+        if file_id:
+            # Return both file ID and job folder ID
+            return {'fileId': file_id, 'jobFolderId': job_id}
+        return None
     except Exception as e:
         print(f'DRIVE ERROR: {e}', flush=True)
         import traceback; traceback.print_exc()
         return None
 
-def move_drive_file(file_id, old_status, new_status, client_name=None):
-    """Move file between status folders, maintaining client subfolder structure"""
+def move_drive_file(file_id, old_status, new_status, client_name=None, job_folder_id=None):
+    """Move job folder (or file) between status folders"""
     try:
         token = get_drive_token()
         if not token:
@@ -125,7 +138,46 @@ def move_drive_file(file_id, old_status, new_status, client_name=None):
         if not old_status_id or not new_status_id:
             return False
 
-        # Find the file's current parent (client folder)
+        # If we have a job folder ID, move the entire job folder
+        if job_folder_id:
+            # Find or create client folder in new status
+            if client_name:
+                new_client_id = get_or_create_folder(token, client_name, new_status_id)
+            else:
+                new_client_id = new_status_id
+            # Get current parent of job folder
+            res = http_requests.get(
+                f'https://www.googleapis.com/drive/v3/files/{job_folder_id}',
+                headers={'Authorization': f'Bearer {token}'},
+                params={'fields': 'id,parents'}
+            )
+            current_parents = res.json().get('parents', [])
+            remove_parents = ','.join(current_parents) if current_parents else ''
+            # Move job folder to new client folder
+            move_res = http_requests.patch(
+                f'https://www.googleapis.com/drive/v3/files/{job_folder_id}',
+                headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
+                params={'addParents': new_client_id, 'removeParents': remove_parents, 'fields': 'id'},
+                json={}
+            )
+            success = 'id' in move_res.json()
+            # Clean up empty client folders in old status
+            if success and current_parents:
+                for parent_id in current_parents:
+                    if parent_id in [old_status_id, new_status_id]: continue
+                    check = http_requests.get(
+                        'https://www.googleapis.com/drive/v3/files',
+                        headers={'Authorization': f'Bearer {token}'},
+                        params={'q': f"'{parent_id}' in parents and trashed=false", 'fields': 'files(id)'}
+                    )
+                    if not check.json().get('files'):
+                        http_requests.delete(
+                            f'https://www.googleapis.com/drive/v3/files/{parent_id}',
+                            headers={'Authorization': f'Bearer {token}'}
+                        )
+            return success
+
+        # Fallback: move just the file
         res = http_requests.get(
             f'https://www.googleapis.com/drive/v3/files/{file_id}',
             headers={'Authorization': f'Bearer {token}'},
@@ -133,25 +185,10 @@ def move_drive_file(file_id, old_status, new_status, client_name=None):
         )
         file_data = res.json()
         current_parents = file_data.get('parents', [])
-
-        # Find or create client folder in destination
         if client_name:
             new_client_id = get_or_create_folder(token, client_name, new_status_id)
         else:
-            # Try to get client name from current parent folder name
-            old_client_id = next((p for p in current_parents if p != old_status_id), None)
-            if old_client_id:
-                folder_res = http_requests.get(
-                    f'https://www.googleapis.com/drive/v3/files/{old_client_id}',
-                    headers={'Authorization': f'Bearer {token}'},
-                    params={'fields': 'name'}
-                )
-                folder_name = folder_res.json().get('name', 'Client')
-                new_client_id = get_or_create_folder(token, folder_name, new_status_id)
-            else:
-                new_client_id = new_status_id
-
-        # Move file to new client folder
+            new_client_id = new_status_id
         remove_parents = ','.join(current_parents) if current_parents else old_status_id
         res = http_requests.patch(
             f'https://www.googleapis.com/drive/v3/files/{file_id}',
@@ -159,26 +196,7 @@ def move_drive_file(file_id, old_status, new_status, client_name=None):
             params={'addParents': new_client_id, 'removeParents': remove_parents, 'fields': 'id'},
             json={}
         )
-        success = 'id' in res.json()
-
-        # Delete empty client folders in old status
-        if success and current_parents:
-            for parent_id in current_parents:
-                if parent_id == old_status_id:
-                    continue
-                # Check if folder is now empty
-                check = http_requests.get(
-                    'https://www.googleapis.com/drive/v3/files',
-                    headers={'Authorization': f'Bearer {token}'},
-                    params={'q': f"'{parent_id}' in parents and trashed=false", 'fields': 'files(id)'}
-                )
-                if not check.json().get('files'):
-                    http_requests.delete(
-                        f'https://www.googleapis.com/drive/v3/files/{parent_id}',
-                        headers={'Authorization': f'Bearer {token}'}
-                    )
-
-        return success
+        return 'id' in res.json()
     except Exception as e:
         print(f'Move error: {e}', flush=True)
         import traceback; traceback.print_exc()
@@ -864,16 +882,21 @@ def generate():
         filename = f"LUCAZProposal_{client_safe}_{date}.docx"
         status = E.get('jobStatus', 'Active')
         existing_file_id = E.get('driveFileId', None)
-        drive_file_id = save_to_drive(doc_bytes, filename, client_name, status, existing_file_id)
-        print(f'DRIVE SAVE: {drive_file_id}', flush=True)
+        proposal_num = E.get('proposalNum', None)
+        drive_result = save_to_drive(doc_bytes, filename, client_name, status, existing_file_id, proposal_num, date)
+        print(f'DRIVE SAVE: {drive_result}', flush=True)
         response = send_file(
             io.BytesIO(doc_bytes),
             mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
             as_attachment=True,
             download_name=filename
         )
-        if drive_file_id:
-            response.headers['X-Drive-File-Id'] = drive_file_id
+        if drive_result:
+            if isinstance(drive_result, dict):
+                response.headers['X-Drive-File-Id'] = drive_result.get('fileId', '')
+                response.headers['X-Job-Folder-Id'] = drive_result.get('jobFolderId', '')
+            else:
+                response.headers['X-Drive-File-Id'] = drive_result
         return response
     except Exception as e:
         import traceback
@@ -887,7 +910,7 @@ def move():
         return '', 200
     try:
         data = flask_request.get_json()
-        success = move_drive_file(data.get('fileId'), data.get('oldStatus'), data.get('newStatus'), data.get('clientName'))
+        success = move_drive_file(data.get('fileId'), data.get('oldStatus'), data.get('newStatus'), data.get('clientName'), data.get('jobFolderId'))
         return jsonify({'success': success})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -956,10 +979,14 @@ def upload_photo():
         # Determine mime type
         mime = 'image/jpeg'
         if 'png' in header: mime = 'image/png'
-        # Get or create Photos folder under client
-        status_id = STATUS_FOLDER_IDS.get('Active')
-        client_id = get_or_create_folder(token, client_name, status_id)
-        photos_id = get_or_create_folder(token, 'Photos', client_id)
+        # Get or create job folder — use jobFolderId if provided, else fall back to Photos under client
+        job_folder_id = data.get('jobFolderId')
+        if job_folder_id:
+            photos_id = get_or_create_folder(token, 'Photos', job_folder_id)
+        else:
+            status_id = STATUS_FOLDER_IDS.get('Active')
+            client_id = get_or_create_folder(token, client_name, status_id)
+            photos_id = get_or_create_folder(token, 'Photos', client_id)
         # Upload photo
         boundary = f'photo_{int(time.time())}'
         ext = 'jpg' if mime == 'image/jpeg' else 'png'
