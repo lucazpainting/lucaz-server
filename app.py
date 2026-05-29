@@ -26,15 +26,18 @@ STATUS_FOLDER_IDS = {
 # ── OAUTH DRIVE ──
 def get_drive_token():
     """Get valid access token, refreshing if needed"""
-    if not os.path.exists(TOKEN_FILE):
-        return None
-    with open(TOKEN_FILE) as f:
-        token_data = json.load(f)
-    # Check if expired and refresh
-    refresh_token = token_data.get('refresh_token')
+    # First try env var for refresh token (persists across deploys)
+    refresh_token = os.environ.get('GOOGLE_REFRESH_TOKEN')
+    
+    # Then try token file
+    if not refresh_token and os.path.exists(TOKEN_FILE):
+        with open(TOKEN_FILE) as f:
+            token_data = json.load(f)
+        refresh_token = token_data.get('refresh_token')
+    
     if not refresh_token:
         return None
-    # Refresh the token
+    
     res = http_requests.post('https://oauth2.googleapis.com/token', data={
         'client_id': CLIENT_ID,
         'client_secret': CLIENT_SECRET,
@@ -43,9 +46,6 @@ def get_drive_token():
     })
     data = res.json()
     if 'access_token' in data:
-        token_data['access_token'] = data['access_token']
-        with open(TOKEN_FILE, 'w') as f:
-            json.dump(token_data, f)
         return data['access_token']
     print(f'Token refresh error: {data}', flush=True)
     return None
@@ -218,9 +218,14 @@ def auth_callback():
     if 'refresh_token' in data:
         with open(TOKEN_FILE, 'w') as f:
             json.dump(data, f)
-        return '''<html><body style="font-family:sans-serif;text-align:center;padding:60px">
+        refresh_token = data['refresh_token']
+        return f'''<html><body style="font-family:sans-serif;text-align:center;padding:60px;max-width:600px;margin:0 auto">
             <h2 style="color:#2d8a4e">✓ Google Drive connected!</h2>
-            <p>You can close this tab. All proposals will now save to your Drive automatically.</p>
+            <p>To make this permanent (so you never need to re-auth after deploys), copy the token below and add it as a Render environment variable:</p>
+            <p><strong>Key:</strong> <code>GOOGLE_REFRESH_TOKEN</code></p>
+            <p><strong>Value:</strong></p>
+            <textarea style="width:100%;height:80px;font-size:11px;padding:8px" onclick="this.select()">{refresh_token}</textarea>
+            <p style="color:#888;font-size:12px">Go to Render → your service → Environment → Add that variable → Save → Redeploy once more. After that, Drive works forever with no re-auth needed.</p>
         </body></html>'''
     return jsonify({'error': 'No refresh token', 'data': data}), 400
 
@@ -422,87 +427,97 @@ def generate_proposal(E):
     for sl in [s for s in all_sides if s not in active_labels]:
         remove_side_block(doc, sl)
 
-    # 8. Renumber side headings, insert custom sides, add notes
+    # 8. Renumber side headings, insert custom sides BEFORE carpentry, add notes
     default_sides_list = ['Front', 'Left', 'Right', 'Back']
+    # Template order for default sides
+    template_order = ['Front', 'Left', 'Right', 'Back']
     
-    # Find insertion point for custom sides (before PROJECT PHOTOS)
+    # Find insertion point for custom sides — BEFORE carpentry section
     body = doc.element.body
     insert_before_el = None
     for child in list(body):
         if child.tag.split('}')[-1] == 'p':
             txt = get_para_text(child, doc)
-            if 'PROJECT PHOTOS' in txt:
+            if 'Inspection & Carpentry' in txt or 'PROJECT PHOTOS' in txt:
                 insert_before_el = child
                 break
 
-    for i, side in enumerate(sides_data):
-        num = i + 3
+    # Renumber default sides based on their position in sides_data
+    default_num = 3
+    for side in sides_data:
         label = side['label']
-        notes = side.get('notes', '').strip()
-
         if label in default_sides_list:
-            # Renumber existing heading
             for para in doc.paragraphs:
                 if label + ' of House' in para.text and para.runs:
-                    para.runs[0].text = f"{num}.  {label} of House"
+                    para.runs[0].text = f"{default_num}.  {label} of House"
                     for r in para.runs[1:]: r.text = ''
                     break
             # Add note after paint table
+            notes = side.get('notes', '').strip()
             if notes:
                 tbl_idx = SIDE_TABLE_IDX.get(label)
                 if tbl_idx is not None and tbl_idx < len(doc.tables):
                     _insert_note_para(doc, doc.tables[tbl_idx]._element, notes)
-        else:
-            # Custom side — insert heading + paint table before photos section
-            if insert_before_el is not None:
-                idx = list(body).index(insert_before_el)
-            else:
-                idx = len(list(body))
+            default_num += 1
 
-            # Heading paragraph
-            heading = OxmlElement('w:p')
-            hPr = OxmlElement('w:pPr')
-            # Try to copy style from an existing side heading
-            for para in doc.paragraphs:
-                if 'of House' in para.text and para._element.find(qn('w:pPr')) is not None:
-                    import copy
-                    hPr = copy.deepcopy(para._element.find(qn('w:pPr')))
-                    break
-            heading.append(hPr)
-            r = OxmlElement('w:r')
-            # Copy run properties from existing heading
-            for para in doc.paragraphs:
-                if 'of House' in para.text and para.runs:
-                    import copy
+    # Insert custom sides before carpentry
+    custom_num = default_num
+    for side in sides_data:
+        label = side['label']
+        if label in default_sides_list:
+            continue
+        notes = side.get('notes', '').strip()
+
+        if insert_before_el is not None:
+            idx = list(body).index(insert_before_el)
+        else:
+            idx = len(list(body))
+
+        # Heading paragraph — copy style from existing side heading
+        heading = OxmlElement('w:p')
+        import copy as _copy
+        for para in doc.paragraphs:
+            if 'of House' in para.text:
+                pPr = para._element.find(qn('w:pPr'))
+                if pPr is not None:
+                    heading.append(_copy.deepcopy(pPr))
+                if para.runs:
+                    r = OxmlElement('w:r')
                     rPr = para.runs[0]._element.find(qn('w:rPr'))
                     if rPr is not None:
-                        r.append(copy.deepcopy(rPr))
-                    break
-            t = OxmlElement('w:t')
-            t.text = f"{num}.  {label}"
-            t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
-            r.append(t); heading.append(r)
-            body.insert(idx, heading); idx += 1
+                        r.append(_copy.deepcopy(rPr))
+                    t = OxmlElement('w:t')
+                    t.text = f"{custom_num}.  {label}"
+                    t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+                    r.append(t); heading.append(r)
+                break
+        body.insert(idx, heading); idx += 1
 
-            # Paint table — copy from first side table and rebuild
-            if len(doc.tables) > 3:
-                import copy
-                tbl_copy = copy.deepcopy(doc.tables[3]._element)
-                from docx.table import Table as DocxTable
-                new_tbl = DocxTable(tbl_copy, doc)
-                rebuild_paint_table(new_tbl, side.get('surfaces', []))
-                body.insert(idx, tbl_copy); idx += 1
-
-            # Add note if any
+        # Paint table
+        if len(doc.tables) > 3:
+            tbl_copy = _copy.deepcopy(doc.tables[3]._element)
+            from docx.table import Table as DocxTable
+            new_tbl = DocxTable(tbl_copy, doc)
+            rebuild_paint_table(new_tbl, side.get('surfaces', []))
+            body.insert(idx, tbl_copy); idx += 1
             if notes:
-                _insert_note_para(doc, tbl_copy if len(doc.tables) > 3 else None, notes, body, idx)
+                _insert_note_para(doc, None, notes, body, idx)
                 idx += 1
 
-            # Spacer
-            spacer = OxmlElement('w:p')
-            body.insert(idx, spacer); idx += 1
-            # Update insert point
-            insert_before_el = spacer
+        # Spacer
+        spacer = OxmlElement('w:p')
+        body.insert(idx, spacer)
+        insert_before_el = spacer
+        custom_num += 1
+
+    # Update carpentry number
+    if E.get('carpentry', {}).get('enabled', False):
+        carp_num = custom_num
+        for para in doc.paragraphs:
+            if 'Inspection & Carpentry' in para.text and para.runs:
+                para.runs[0].text = f"{carp_num}.  Inspection & Carpentry (Work Change Order)"
+                for r in para.runs[1:]: r.text = ''
+                break
 
     # 9. Carpentry
     if not E.get('carpentry', {}).get('enabled', False):
@@ -522,12 +537,7 @@ def generate_proposal(E):
             try: body.remove(el)
             except: pass
     else:
-        num = len(active_labels) + 3
-        for para in doc.paragraphs:
-            if 'Inspection & Carpentry' in para.text and para.runs:
-                para.runs[0].text = f"{num}.  Inspection & Carpentry (Work Change Order)"
-                for r in para.runs[1:]: r.text = ''
-                break
+        pass  # Carpentry numbering handled in step 8
 
     # 10. Duration
     duration = E.get('duration', '')
