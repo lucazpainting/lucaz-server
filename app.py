@@ -447,9 +447,40 @@ def generate_proposal(E):
 
     # 8. Renumber side headings, insert custom sides BEFORE carpentry, add notes
     default_sides_list = ['Front', 'Left', 'Right', 'Back']
-    # Template order for default sides
+    # Template physical order is always Front, Left, Right, Back
     template_order = ['Front', 'Left', 'Right', 'Back']
-    
+
+    # Build number map based on which default sides are active, in template order
+    active_default_sides = [s['label'] for s in sides_data if s['label'] in default_sides_list]
+    # Assign numbers in template order
+    num_map = {}
+    num = 3
+    for label in template_order:
+        if label in active_default_sides:
+            num_map[label] = num
+            num += 1
+
+    # Renumber default sides using template-order numbers
+    for side in sides_data:
+        label = side['label']
+        if label not in default_sides_list:
+            continue
+        side_num = num_map.get(label, 3)
+        for para in doc.paragraphs:
+            if label + ' of House' in para.text and para.runs:
+                para.runs[0].text = f"{side_num}.  {label} of House"
+                for r in para.runs[1:]: r.text = ''
+                break
+        # Add note after paint table
+        notes = side.get('notes', '').strip()
+        if notes:
+            tbl_idx = SIDE_TABLE_IDX.get(label)
+            if tbl_idx is not None and tbl_idx < len(doc.tables):
+                _insert_note_para(doc, doc.tables[tbl_idx]._element, notes)
+
+    # Custom sides start after all default sides
+    custom_num = num
+
     # Find insertion point for custom sides — BEFORE carpentry section
     body = doc.element.body
     insert_before_el = None
@@ -459,27 +490,6 @@ def generate_proposal(E):
             if 'Inspection & Carpentry' in txt or 'PROJECT PHOTOS' in txt:
                 insert_before_el = child
                 break
-
-    # Renumber default sides based on their position in sides_data
-    default_num = 3
-    for side in sides_data:
-        label = side['label']
-        if label in default_sides_list:
-            for para in doc.paragraphs:
-                if label + ' of House' in para.text and para.runs:
-                    para.runs[0].text = f"{default_num}.  {label} of House"
-                    for r in para.runs[1:]: r.text = ''
-                    break
-            # Add note after paint table
-            notes = side.get('notes', '').strip()
-            if notes:
-                tbl_idx = SIDE_TABLE_IDX.get(label)
-                if tbl_idx is not None and tbl_idx < len(doc.tables):
-                    _insert_note_para(doc, doc.tables[tbl_idx]._element, notes)
-            default_num += 1
-
-    # Insert custom sides before carpentry
-    custom_num = default_num
     for side in sides_data:
         label = side['label']
         if label in default_sides_list:
