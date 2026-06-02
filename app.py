@@ -613,8 +613,8 @@ def generate_proposal(E):
                 if payment_type == 'thirds':
                     # Insert mid-payment row before balance
                     if mid_payment:
-                        import copy
-                        mid_row = copy.deepcopy(row._element)
+                        import copy as _cp
+                        mid_row = _cp.deepcopy(row._element)
                         cells = mid_row.findall(qn('w:tc'))
                         if len(cells) >= 2:
                             for t in cells[0].findall(f'.//{qn("w:t")}'): t.text = 'Mid-Project Payment (1/3)'
@@ -820,7 +820,7 @@ def generate_proposal(E):
             body.insert(idx, make_table(row_photos, doc))
             idx += 1
             if ri < len(rows) - 1:
-                body.insert(idx, copy.deepcopy(spacer)); idx += 1
+                body.insert(idx, _copy.deepcopy(spacer)); idx += 1
 
     # 14. Porta Potty
     if not E.get('portaPotty', False):
