@@ -887,44 +887,13 @@ def generate_proposal(E):
             cell = sig_tbl.rows[0].cells[col_idx]
             for p_el in list(cell._element.findall(qn('w:p'))):
                 cell._element.remove(p_el)
-
-            if col_idx == 2:
-                # Contractor side — embed signature image + printed name
-                cell._element.append(make_sig_label(''))
-                cell._element.append(make_sig_line(60))
-                # Add signature image
-                try:
-                    import base64 as _b64, io as _io
-                    from docx.shared import Inches
-                    sig_bytes = _b64.b64decode(CONTRACTOR_SIG_B64)
-                    # Add paragraph with image using python-docx properly
-                    from docx.oxml.ns import nsmap
-                    # Create a temporary paragraph in the cell
-                    from docx.text.paragraph import Paragraph
-                    # Add directly to cell
-                    sig_p = cell.add_paragraph()
-                    sig_run = sig_p.add_run()
-                    sig_run.add_picture(_io.BytesIO(sig_bytes), width=Inches(1.4))
-                    # Move it to right position (before name label)
-                    sig_p_el = sig_p._element
-                    cell._element.remove(sig_p_el)
-                    cell._element.append(sig_p_el)
-                except Exception as sig_err:
-                    print(f'Sig image error: {sig_err}', flush=True)
-                    cell._element.append(make_sig_line(160))
-                cell._element.append(make_sig_label(CONTRACTOR_NAME, bold=True))
-                cell._element.append(make_sig_label(sig_lbl))
-                cell._element.append(make_sig_line(200))
-                cell._element.append(make_sig_label('Date'))
-            else:
-                # Client side — blank lines to sign
-                cell._element.append(make_sig_label(''))
-                cell._element.append(make_sig_line(200))
-                cell._element.append(make_sig_label(name_lbl, bold=True))
-                cell._element.append(make_sig_line(320))
-                cell._element.append(make_sig_label(sig_lbl))
-                cell._element.append(make_sig_line(320))
-                cell._element.append(make_sig_label('Date'))
+            cell._element.append(make_sig_label(''))
+            cell._element.append(make_sig_line(200))
+            cell._element.append(make_sig_label(name_lbl, bold=True))
+            cell._element.append(make_sig_line(320))
+            cell._element.append(make_sig_label(sig_lbl))
+            cell._element.append(make_sig_line(320))
+            cell._element.append(make_sig_label('Date'))
 
     buf = io.BytesIO()
     doc.save(buf)
