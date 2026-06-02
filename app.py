@@ -503,17 +503,16 @@ def generate_proposal(E):
 
         # Heading paragraph — copy style from existing side heading
         heading = OxmlElement('w:p')
-        import copy as _copy
         for para in doc.paragraphs:
             if 'of House' in para.text:
                 pPr = para._element.find(qn('w:pPr'))
                 if pPr is not None:
-                    heading.append(_copy.deepcopy(pPr))
+                    heading.append(copy.deepcopy(pPr))
                 if para.runs:
                     r = OxmlElement('w:r')
                     rPr = para.runs[0]._element.find(qn('w:rPr'))
                     if rPr is not None:
-                        r.append(_copy.deepcopy(rPr))
+                        r.append(copy.deepcopy(rPr))
                     t = OxmlElement('w:t')
                     t.text = f"{custom_num}.  {label}"
                     t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
@@ -523,7 +522,7 @@ def generate_proposal(E):
 
         # Paint table
         if len(doc.tables) > 3:
-            tbl_copy = _copy.deepcopy(doc.tables[3]._element)
+            tbl_copy = copy.deepcopy(doc.tables[3]._element)
             from docx.table import Table as DocxTable
             new_tbl = DocxTable(tbl_copy, doc)
             rebuild_paint_table(new_tbl, side.get('surfaces', []))
@@ -613,8 +612,7 @@ def generate_proposal(E):
                 if payment_type == 'thirds':
                     # Insert mid-payment row before balance
                     if mid_payment:
-                        import copy as _cp
-                        mid_row = _cp.deepcopy(row._element)
+                        mid_row = copy.deepcopy(row._element)
                         cells = mid_row.findall(qn('w:tc'))
                         if len(cells) >= 2:
                             for t in cells[0].findall(f'.//{qn("w:t")}'): t.text = 'Mid-Project Payment (1/3)'
@@ -820,7 +818,7 @@ def generate_proposal(E):
             body.insert(idx, make_table(row_photos, doc))
             idx += 1
             if ri < len(rows) - 1:
-                body.insert(idx, _copy.deepcopy(spacer)); idx += 1
+                body.insert(idx, copy.deepcopy(spacer)); idx += 1
 
     # 14. Porta Potty
     if not E.get('portaPotty', False):
@@ -903,7 +901,6 @@ def generate_proposal(E):
                     _tr.add_picture(sig_buf, width=Inches(1.4))
                     drawing = _tp._element.find(f'.//{qn("w:drawing")}')
                     if drawing is not None:
-                        import copy
                         sig_r = OxmlElement('w:r')
                         sig_r.append(copy.deepcopy(drawing))
                         sig_para.append(sig_r)
@@ -932,10 +929,9 @@ def generate_proposal(E):
 
 def _make_page_field(ref_run_el):
     rpr = ref_run_el.find(qn('w:rPr'))
-    import copy as _copy
     def make_r():
         r = OxmlElement('w:r')
-        if rpr is not None: r.append(_copy.deepcopy(rpr))
+        if rpr is not None: r.append(copy.deepcopy(rpr))
         return r
     r1 = make_r()
     fc = OxmlElement('w:fldChar'); fc.set(qn('w:fldCharType'), 'begin'); r1.append(fc)
