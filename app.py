@@ -584,7 +584,6 @@ def generate_proposal(E):
     is_cash = E.get('cashPayment', False)
     payment_type = E.get('paymentType', 'thirds')  # 'thirds' or 'half'
     tax_pct = E.get('salesTaxPct', '8.375%')
-    mid_payment = E.get('midPayment', None)
 
     for tbl in doc.tables:
         rows_to_remove = []
@@ -592,7 +591,7 @@ def generate_proposal(E):
             if len(row.cells) < 2: continue
             cell0 = row.cells[0].text.strip()
 
-            # Sales Tax row
+            # Sales Tax row — remove if cash
             if 'Sales Tax' in cell0:
                 if is_cash:
                     rows_to_remove.append(row)
@@ -601,26 +600,15 @@ def generate_proposal(E):
                     set_cell_text(row.cells[1], E.get('salesTaxAmt',''))
                 continue
 
-            # Deposit row
-            if 'Deposit Due' in cell0 or 'Deposit' in cell0:
-                if payment_type == 'thirds':
-                    set_cell_text(row.cells[0], 'Deposit Due (1/3)', bold=True)
-                else:
-                    set_cell_text(row.cells[0], 'Deposit Due (1/2)', bold=True)
+            # Deposit row — label changes based on payment type
+            if 'Deposit Due' in cell0 or ('Deposit' in cell0 and 'Due' in cell0):
+                lbl = 'Deposit Due (1/3)' if payment_type == 'thirds' else 'Deposit Due (1/2)'
+                set_cell_text(row.cells[0], lbl, bold=True)
                 set_cell_text(row.cells[1], E.get('deposit',''))
                 continue
 
-            # Balance row  
+            # Balance Due
             if 'Balance Due' in cell0:
-                if payment_type == 'thirds':
-                    # Insert mid-payment row before balance
-                    if mid_payment:
-                        mid_row = copy.deepcopy(row._element)
-                        cells = mid_row.findall(qn('w:tc'))
-                        if len(cells) >= 2:
-                            for t in cells[0].findall(f'.//{qn("w:t")}'): t.text = 'Mid-Project Payment (1/3)'
-                            for t in cells[1].findall(f'.//{qn("w:t")}'): t.text = mid_payment
-                        row._element.addprevious(mid_row)
                 set_cell_text(row.cells[1], E.get('balance',''))
                 continue
 
@@ -639,24 +627,45 @@ def generate_proposal(E):
             try: row._element.getparent().remove(row._element)
             except: pass
 
-    # If cash payment — add "Cash Payment" note to cost table
+    # Add cash payment note if applicable
     if is_cash:
         for tbl in doc.tables:
             for row in tbl.rows:
                 if 'Total Cost for Project' in row.cells[0].text:
                     cash_para = OxmlElement('w:p')
+                    pPr = OxmlElement('w:pPr')
+                    sp = OxmlElement('w:spacing'); sp.set(qn('w:before'),'80'); sp.set(qn('w:after'),'0')
+                    pPr.append(sp); cash_para.append(pPr)
                     r = OxmlElement('w:r')
                     rPr = OxmlElement('w:rPr')
                     b = OxmlElement('w:b')
                     clr = OxmlElement('w:color'); clr.set(qn('w:val'), '2d8a4e')
-                    rPr.append(b); rPr.append(clr); r.append(rPr)
-                    t = OxmlElement('w:t'); t.text = '✓ Client paying cash — no sales tax applied'
+                    sz = OxmlElement('w:sz'); sz.set(qn('w:val'), '20')
+                    rPr.append(b); rPr.append(clr); rPr.append(sz); r.append(rPr)
+                    t = OxmlElement('w:t'); t.text = '✓ Client paying cash'
                     t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
                     r.append(t); cash_para.append(r)
                     tbl._element.addnext(cash_para)
                     break
 
-    # 12. Fix spacing before photos
+    # 11b. Update Payment Terms paragraph to match payment structure
+    payment_bullets = doc.paragraphs[43:46] if len(doc.paragraphs) > 45 else []
+    for para in doc.paragraphs:
+        txt = para.text.strip()
+        if txt == '1/3 deposit due at contract signing':
+            if payment_type == 'half':
+                for run in para.runs: run.text = ''
+                if para.runs: para.runs[0].text = '50% deposit due at contract signing'
+        elif txt == '1/3 due at 50% project completion':
+            if payment_type == 'half':
+                for run in para.runs: run.text = ''
+                # Remove this bullet for half payment
+                p_el = para._element
+                p_el.getparent().remove(p_el)
+        elif txt == '1/3 final payment due upon completion':
+            if payment_type == 'half':
+                for run in para.runs: run.text = ''
+                if para.runs: para.runs[0].text = '50% balance due upon completion'
     for para in doc.paragraphs:
         if 'Photos of the areas' in para.text:
             pPr = para._element.find(qn('w:pPr'))
@@ -888,26 +897,18 @@ def generate_proposal(E):
                     import base64 as _b64, io as _io
                     from docx.shared import Inches
                     sig_bytes = _b64.b64decode(CONTRACTOR_SIG_B64)
-                    sig_buf = _io.BytesIO(sig_bytes)
-                    # Create paragraph with image
-                    sig_para = OxmlElement('w:p')
-                    sig_pPr = OxmlElement('w:pPr')
-                    sig_jc = OxmlElement('w:jc'); sig_jc.set(qn('w:val'), 'left')
-                    sig_sp = OxmlElement('w:spacing'); sig_sp.set(qn('w:before'), '0'); sig_sp.set(qn('w:after'), '0')
-                    sig_pPr.append(sig_jc); sig_pPr.append(sig_sp)
-                    sig_para.append(sig_pPr)
-                    # Use temp doc to add picture
-                    from docx import Document as _TmpDoc
-                    _tmp = _TmpDoc()
-                    _tp = _tmp.add_paragraph()
-                    _tr = _tp.add_run()
-                    _tr.add_picture(sig_buf, width=Inches(1.4))
-                    drawing = _tp._element.find(f'.//{qn("w:drawing")}')
-                    if drawing is not None:
-                        sig_r = OxmlElement('w:r')
-                        sig_r.append(copy.deepcopy(drawing))
-                        sig_para.append(sig_r)
-                    cell._element.append(sig_para)
+                    # Add paragraph with image using python-docx properly
+                    from docx.oxml.ns import nsmap
+                    # Create a temporary paragraph in the cell
+                    from docx.text.paragraph import Paragraph
+                    # Add directly to cell
+                    sig_p = cell.add_paragraph()
+                    sig_run = sig_p.add_run()
+                    sig_run.add_picture(_io.BytesIO(sig_bytes), width=Inches(1.4))
+                    # Move it to right position (before name label)
+                    sig_p_el = sig_p._element
+                    cell._element.remove(sig_p_el)
+                    cell._element.append(sig_p_el)
                 except Exception as sig_err:
                     print(f'Sig image error: {sig_err}', flush=True)
                     cell._element.append(make_sig_line(160))
