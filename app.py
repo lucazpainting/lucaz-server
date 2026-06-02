@@ -579,27 +579,80 @@ def generate_proposal(E):
                 break
 
     # 11. Cost table
+    is_cash = E.get('cashPayment', False)
+    payment_type = E.get('paymentType', 'thirds')  # 'thirds' or 'half'
     tax_pct = E.get('salesTaxPct', '8.375%')
-    cost_map = {
-        'Subtotal': E.get('subtotal',''),
-        'Sales Tax': E.get('salesTaxAmt',''),
-        'Total Cost for Project': E.get('total',''),
-        'Deposit Due': E.get('deposit',''),
-        'Balance Due': E.get('balance',''),
-        'Porta Potty': E.get('portaPottyAmt','$200.00'),
-    }
+    mid_payment = E.get('midPayment', None)
+
     for tbl in doc.tables:
+        rows_to_remove = []
         for row in tbl.rows:
             if len(row.cells) < 2: continue
             cell0 = row.cells[0].text.strip()
-            # Update Sales Tax label with correct percentage
+
+            # Sales Tax row
             if 'Sales Tax' in cell0:
-                set_cell_text(row.cells[0], f'Sales Tax ({tax_pct})', italic=False)
-                set_cell_text(row.cells[1], E.get('salesTaxAmt',''))
+                if is_cash:
+                    rows_to_remove.append(row)
+                else:
+                    set_cell_text(row.cells[0], f'Sales Tax ({tax_pct})', italic=False)
+                    set_cell_text(row.cells[1], E.get('salesTaxAmt',''))
                 continue
+
+            # Deposit row
+            if 'Deposit Due' in cell0 or 'Deposit' in cell0:
+                if payment_type == 'thirds':
+                    set_cell_text(row.cells[0], 'Deposit Due (1/3)', bold=True)
+                else:
+                    set_cell_text(row.cells[0], 'Deposit Due (1/2)', bold=True)
+                set_cell_text(row.cells[1], E.get('deposit',''))
+                continue
+
+            # Balance row  
+            if 'Balance Due' in cell0:
+                if payment_type == 'thirds':
+                    # Insert mid-payment row before balance
+                    if mid_payment:
+                        import copy
+                        mid_row = copy.deepcopy(row._element)
+                        cells = mid_row.findall(qn('w:tc'))
+                        if len(cells) >= 2:
+                            for t in cells[0].findall(f'.//{qn("w:t")}'): t.text = 'Mid-Project Payment (1/3)'
+                            for t in cells[1].findall(f'.//{qn("w:t")}'): t.text = mid_payment
+                        row._element.addprevious(mid_row)
+                set_cell_text(row.cells[1], E.get('balance',''))
+                continue
+
+            # Subtotal, Total, Porta Potty
+            cost_map = {
+                'Subtotal': E.get('subtotal',''),
+                'Total Cost for Project': E.get('total',''),
+                'Porta Potty': E.get('portaPottyAmt','$200.00'),
+            }
             for key, val in cost_map.items():
                 if val and key in cell0:
                     set_cell_text(row.cells[1], val)
+                    break
+
+        for row in rows_to_remove:
+            try: row._element.getparent().remove(row._element)
+            except: pass
+
+    # If cash payment — add "Cash Payment" note to cost table
+    if is_cash:
+        for tbl in doc.tables:
+            for row in tbl.rows:
+                if 'Total Cost for Project' in row.cells[0].text:
+                    cash_para = OxmlElement('w:p')
+                    r = OxmlElement('w:r')
+                    rPr = OxmlElement('w:rPr')
+                    b = OxmlElement('w:b')
+                    clr = OxmlElement('w:color'); clr.set(qn('w:val'), '2d8a4e')
+                    rPr.append(b); rPr.append(clr); r.append(rPr)
+                    t = OxmlElement('w:t'); t.text = '✓ Client paying cash — no sales tax applied'
+                    t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+                    r.append(t); cash_para.append(r)
+                    tbl._element.addnext(cash_para)
                     break
 
     # 12. Fix spacing before photos
@@ -824,13 +877,53 @@ def generate_proposal(E):
             cell = sig_tbl.rows[0].cells[col_idx]
             for p_el in list(cell._element.findall(qn('w:p'))):
                 cell._element.remove(p_el)
-            cell._element.append(make_sig_label(''))
-            cell._element.append(make_sig_line(200))
-            cell._element.append(make_sig_label(name_lbl, bold=True))
-            cell._element.append(make_sig_line(320))
-            cell._element.append(make_sig_label(sig_lbl))
-            cell._element.append(make_sig_line(320))
-            cell._element.append(make_sig_label('Date'))
+
+            if col_idx == 2:
+                # Contractor side — embed signature image + printed name
+                cell._element.append(make_sig_label(''))
+                cell._element.append(make_sig_line(60))
+                # Add signature image
+                try:
+                    import base64 as _b64, io as _io
+                    from docx.shared import Inches
+                    sig_bytes = _b64.b64decode(CONTRACTOR_SIG_B64)
+                    sig_buf = _io.BytesIO(sig_bytes)
+                    # Create paragraph with image
+                    sig_para = OxmlElement('w:p')
+                    sig_pPr = OxmlElement('w:pPr')
+                    sig_jc = OxmlElement('w:jc'); sig_jc.set(qn('w:val'), 'left')
+                    sig_sp = OxmlElement('w:spacing'); sig_sp.set(qn('w:before'), '0'); sig_sp.set(qn('w:after'), '0')
+                    sig_pPr.append(sig_jc); sig_pPr.append(sig_sp)
+                    sig_para.append(sig_pPr)
+                    # Use temp doc to add picture
+                    from docx import Document as _TmpDoc
+                    _tmp = _TmpDoc()
+                    _tp = _tmp.add_paragraph()
+                    _tr = _tp.add_run()
+                    _tr.add_picture(sig_buf, width=Inches(1.4))
+                    drawing = _tp._element.find(f'.//{qn("w:drawing")}')
+                    if drawing is not None:
+                        import copy
+                        sig_r = OxmlElement('w:r')
+                        sig_r.append(copy.deepcopy(drawing))
+                        sig_para.append(sig_r)
+                    cell._element.append(sig_para)
+                except Exception as sig_err:
+                    print(f'Sig image error: {sig_err}', flush=True)
+                    cell._element.append(make_sig_line(160))
+                cell._element.append(make_sig_label(CONTRACTOR_NAME, bold=True))
+                cell._element.append(make_sig_label(sig_lbl))
+                cell._element.append(make_sig_line(200))
+                cell._element.append(make_sig_label('Date'))
+            else:
+                # Client side — blank lines to sign
+                cell._element.append(make_sig_label(''))
+                cell._element.append(make_sig_line(200))
+                cell._element.append(make_sig_label(name_lbl, bold=True))
+                cell._element.append(make_sig_line(320))
+                cell._element.append(make_sig_label(sig_lbl))
+                cell._element.append(make_sig_line(320))
+                cell._element.append(make_sig_label('Date'))
 
     buf = io.BytesIO()
     doc.save(buf)
