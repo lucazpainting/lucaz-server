@@ -629,7 +629,10 @@ def generate_proposal(E):
                 set_cell_text(row.cells[1], E.get('balance',''))
                 continue
 
-            # Subtotal, Total, Porta Potty
+            # Subtotal, Total, Porta Potty — hide Subtotal row if cash payment
+            if 'Subtotal' in cell0 and is_cash:
+                rows_to_remove.append(row)
+                continue
             cost_map = {
                 'Subtotal': E.get('subtotal',''),
                 'Total Cost for Project': E.get('total',''),
