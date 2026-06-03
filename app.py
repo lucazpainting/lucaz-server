@@ -898,59 +898,73 @@ def generate_proposal(E):
             r.append(t); p.append(r)
             return p
 
-        # Left (client) side
+        def make_spacer(space_before=200):
+            p = OxmlElement('w:p')
+            pPr = OxmlElement('w:pPr')
+            sp = OxmlElement('w:spacing')
+            sp.set(qn('w:before'), str(space_before)); sp.set(qn('w:after'), '0')
+            pPr.append(sp); p.append(pPr)
+            r = OxmlElement('w:r')
+            t = OxmlElement('w:t'); t.text = ' '; r.append(t); p.append(r)
+            return p
+
+        # Left (client) side — blank space, then line, Client Name, line, Client Signature, line, Date
         left_cell = sig_tbl.rows[0].cells[0]
         for p_el in list(left_cell._element.findall(qn('w:p'))):
             left_cell._element.remove(p_el)
-        left_cell._element.append(make_sig_label(''))
-        left_cell._element.append(make_sig_line(200))
+        left_cell._element.append(make_spacer(400))   # blank space at top to align with right side
+        left_cell._element.append(make_sig_line(0))
         left_cell._element.append(make_sig_label('Client Name', bold=True))
-        left_cell._element.append(make_sig_line(320))
+        left_cell._element.append(make_spacer(280))
+        left_cell._element.append(make_sig_line(0))
         left_cell._element.append(make_sig_label('Client Signature'))
-        left_cell._element.append(make_sig_line(320))
+        left_cell._element.append(make_spacer(280))
+        left_cell._element.append(make_sig_line(0))
         left_cell._element.append(make_sig_label('Date'))
 
-        # Right (contractor) side
+        # Right (contractor) side — Carlos Zabarburu, line, Contractor, image, line, Authorized Signature, line, date
         if len(sig_tbl.rows[0].cells) >= 3:
             right_cell = sig_tbl.rows[0].cells[2]
             for p_el in list(right_cell._element.findall(qn('w:p'))):
                 right_cell._element.remove(p_el)
-            # "Carlos Zabarburu" printed above the line
             right_cell._element.append(make_sig_label('Carlos Zabarburu'))
-            right_cell._element.append(make_sig_line(20))
+            right_cell._element.append(make_sig_line(0))
             right_cell._element.append(make_sig_label('Contractor', bold=True))
-            # Signature image
+            # Signature image — sits cleanly after Contractor label
             try:
-                import base64, requests as _req
+                import requests as _req
+                from docx.shared import Inches
+                from docx import Document as _Doc
                 sig_url = 'https://raw.githubusercontent.com/lucazpainting/lucaz-app/main/signature.png'
-                sig_resp = _req.get(sig_url, timeout=5)
-                if sig_resp.status_code == 200:
-                    from docx.shared import Inches
-                    sig_img_stream = io.BytesIO(sig_resp.content)
+                sig_resp = _req.get(sig_url, timeout=10)
+                sig_resp.raise_for_status()
+                sig_img_stream = io.BytesIO(sig_resp.content)
+                _tmp = _Doc()
+                _tmp_para = _tmp.add_paragraph()
+                _tmp_para.add_run().add_picture(sig_img_stream, width=Inches(1.3))
+                inline = _tmp_para.runs[0]._r.find(
+                    './/{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}inline'
+                )
+                if inline is not None:
                     sig_para = OxmlElement('w:p')
                     sig_pPr = OxmlElement('w:pPr')
                     sig_sp = OxmlElement('w:spacing')
-                    sig_sp.set(qn('w:before'), '40'); sig_sp.set(qn('w:after'), '40')
+                    sig_sp.set(qn('w:before'), '60'); sig_sp.set(qn('w:after'), '60')
                     sig_pPr.append(sig_sp); sig_para.append(sig_pPr)
-                    from docx.oxml.ns import nsmap
-                    from docx import Document as _Doc
-                    _tmp = _Doc()
-                    _tmp_para = _tmp.add_paragraph()
-                    run_obj = _tmp_para.add_run()
-                    run_obj.add_picture(sig_img_stream, width=Inches(1.4))
-                    inline = _tmp_para.runs[0]._r.find('.//{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}inline')
-                    if inline is not None:
-                        r_el = OxmlElement('w:r')
-                        drawing = OxmlElement('w:drawing')
-                        drawing.append(copy.deepcopy(inline))
-                        r_el.append(drawing)
-                        sig_para.append(r_el)
+                    r_el = OxmlElement('w:r')
+                    drawing = OxmlElement('w:drawing')
+                    drawing.append(copy.deepcopy(inline))
+                    r_el.append(drawing)
+                    sig_para.append(r_el)
                     right_cell._element.append(sig_para)
+                else:
+                    right_cell._element.append(make_spacer(280))
             except Exception:
-                right_cell._element.append(make_sig_label(''))
-            right_cell._element.append(make_sig_line(80))
+                right_cell._element.append(make_spacer(280))
+            right_cell._element.append(make_sig_line(0))
             right_cell._element.append(make_sig_label('Authorized Signature'))
-            right_cell._element.append(make_sig_line(320))
+            right_cell._element.append(make_spacer(280))
+            right_cell._element.append(make_sig_line(0))
             right_cell._element.append(make_sig_label(formatted_date))
 
     buf = io.BytesIO()
