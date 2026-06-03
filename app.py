@@ -623,8 +623,9 @@ def generate_proposal(E):
                 set_cell_text(row.cells[1], E.get('deposit',''))
                 continue
 
-            # Balance Due
+            # Balance Due — always shows as Remaining Balance Due
             if 'Balance Due' in cell0:
+                set_cell_text(row.cells[0], 'Remaining Balance Due', bold=True)
                 set_cell_text(row.cells[1], E.get('balance',''))
                 continue
 
@@ -856,116 +857,7 @@ def generate_proposal(E):
                     row._element.getparent().remove(row._element)
                     break
 
-    # 15. Signature section
-    sig_tbl = None
-    for tbl in doc.tables:
-        if len(tbl.rows) > 0 and len(tbl.rows[0].cells) >= 3:
-            if 'Client' in tbl.rows[0].cells[0].text or 'Signature' in tbl.rows[0].cells[0].text:
-                sig_tbl = tbl; break
-
-    if sig_tbl:
-        def make_sig_line(space_before=160):
-            p = OxmlElement('w:p')
-            pPr = OxmlElement('w:pPr')
-            pBdr = OxmlElement('w:pBdr')
-            bot = OxmlElement('w:bottom')
-            bot.set(qn('w:val'), 'single'); bot.set(qn('w:sz'), '6')
-            bot.set(qn('w:space'), '1'); bot.set(qn('w:color'), '000000')
-            pBdr.append(bot)
-            sp = OxmlElement('w:spacing')
-            sp.set(qn('w:before'), str(space_before)); sp.set(qn('w:after'), '40')
-            pPr.append(pBdr); pPr.append(sp); p.append(pPr)
-            r = OxmlElement('w:r')
-            t = OxmlElement('w:t'); t.text = ' '; r.append(t); p.append(r)
-            return p
-
-        def make_sig_label(text, bold=False):
-            p = OxmlElement('w:p')
-            pPr = OxmlElement('w:pPr')
-            sp = OxmlElement('w:spacing')
-            sp.set(qn('w:before'), '40'); sp.set(qn('w:after'), '20')
-            pPr.append(sp); p.append(pPr)
-            r = OxmlElement('w:r')
-            rPr = OxmlElement('w:rPr')
-            fn = OxmlElement('w:rFonts'); fn.set(qn('w:ascii'), 'Calibri'); fn.set(qn('w:hAnsi'), 'Calibri')
-            sz = OxmlElement('w:sz'); sz.set(qn('w:val'), '18')
-            rPr.append(fn); rPr.append(sz)
-            if bold:
-                b = OxmlElement('w:b'); rPr.append(b)
-            r.append(rPr)
-            t = OxmlElement('w:t'); t.text = text
-            t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
-            r.append(t); p.append(r)
-            return p
-
-        def make_spacer(space_before=200):
-            p = OxmlElement('w:p')
-            pPr = OxmlElement('w:pPr')
-            sp = OxmlElement('w:spacing')
-            sp.set(qn('w:before'), str(space_before)); sp.set(qn('w:after'), '0')
-            pPr.append(sp); p.append(pPr)
-            r = OxmlElement('w:r')
-            t = OxmlElement('w:t'); t.text = ' '; r.append(t); p.append(r)
-            return p
-
-        # Left (client) side — blank space, then line, Client Name, line, Client Signature, line, Date
-        left_cell = sig_tbl.rows[0].cells[0]
-        for p_el in list(left_cell._element.findall(qn('w:p'))):
-            left_cell._element.remove(p_el)
-        left_cell._element.append(make_spacer(400))   # blank space at top to align with right side
-        left_cell._element.append(make_sig_line(0))
-        left_cell._element.append(make_sig_label('Client Name', bold=True))
-        left_cell._element.append(make_spacer(280))
-        left_cell._element.append(make_sig_line(0))
-        left_cell._element.append(make_sig_label('Client Signature'))
-        left_cell._element.append(make_spacer(280))
-        left_cell._element.append(make_sig_line(0))
-        left_cell._element.append(make_sig_label('Date'))
-
-        # Right (contractor) side — Carlos Zabarburu, line, Contractor, image, line, Authorized Signature, line, date
-        if len(sig_tbl.rows[0].cells) >= 3:
-            right_cell = sig_tbl.rows[0].cells[2]
-            for p_el in list(right_cell._element.findall(qn('w:p'))):
-                right_cell._element.remove(p_el)
-            right_cell._element.append(make_sig_label('Carlos Zabarburu'))
-            right_cell._element.append(make_sig_line(0))
-            right_cell._element.append(make_sig_label('Contractor', bold=True))
-            # Signature image — sits cleanly after Contractor label
-            try:
-                import requests as _req
-                from docx.shared import Inches
-                from docx import Document as _Doc
-                sig_url = 'https://raw.githubusercontent.com/lucazpainting/lucaz-app/main/signature.png'
-                sig_resp = _req.get(sig_url, timeout=10)
-                sig_resp.raise_for_status()
-                sig_img_stream = io.BytesIO(sig_resp.content)
-                _tmp = _Doc()
-                _tmp_para = _tmp.add_paragraph()
-                _tmp_para.add_run().add_picture(sig_img_stream, width=Inches(1.3))
-                inline = _tmp_para.runs[0]._r.find(
-                    './/{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}inline'
-                )
-                if inline is not None:
-                    sig_para = OxmlElement('w:p')
-                    sig_pPr = OxmlElement('w:pPr')
-                    sig_sp = OxmlElement('w:spacing')
-                    sig_sp.set(qn('w:before'), '60'); sig_sp.set(qn('w:after'), '60')
-                    sig_pPr.append(sig_sp); sig_para.append(sig_pPr)
-                    r_el = OxmlElement('w:r')
-                    drawing = OxmlElement('w:drawing')
-                    drawing.append(copy.deepcopy(inline))
-                    r_el.append(drawing)
-                    sig_para.append(r_el)
-                    right_cell._element.append(sig_para)
-                else:
-                    right_cell._element.append(make_spacer(280))
-            except Exception:
-                right_cell._element.append(make_spacer(280))
-            right_cell._element.append(make_sig_line(0))
-            right_cell._element.append(make_sig_label('Authorized Signature'))
-            right_cell._element.append(make_spacer(280))
-            right_cell._element.append(make_sig_line(0))
-            right_cell._element.append(make_sig_label(formatted_date))
+    # 15. Signature section — left untouched, handled manually
 
     buf = io.BytesIO()
     doc.save(buf)
