@@ -908,6 +908,85 @@ def get_photo_bytes(photo_ref):
             print(f'Photo download error: {e}', flush=True)
         return None
 
+def _make_interior_paint_table(surfaces):
+    """Build a paint table from scratch for interior rooms, matching exterior style."""
+    # Column widths (total ~9360 twips): Surface, Paint/Primer, Sheen, Color, Coats
+    col_widths = [2000, 2800, 1400, 1760, 1400]
+    headers = ['Surface', 'Paint / Primer', 'Sheen', 'Color', 'Coats']
+    header_fill = '7A1A1A'  # dark red
+    header_text_color = 'FFFFFF'
+    row_fills = ['FFFFFF', 'FAF5F5']
+
+    tbl = OxmlElement('w:tbl')
+
+    # Table properties
+    tblPr = OxmlElement('w:tblPr')
+    tblStyle = OxmlElement('w:tblStyle'); tblStyle.set(qn('w:val'), 'TableGrid')
+    tblW = OxmlElement('w:tblW'); tblW.set(qn('w:w'), '9360'); tblW.set(qn('w:type'), 'dxa')
+    tblBorders = OxmlElement('w:tblBorders')
+    for side in ['top','left','bottom','right','insideH','insideV']:
+        b = OxmlElement(f'w:{side}')
+        b.set(qn('w:val'), 'single'); b.set(qn('w:sz'), '4'); b.set(qn('w:color'), 'CCCCCC')
+        tblBorders.append(b)
+    tblPr.append(tblStyle); tblPr.append(tblW); tblPr.append(tblBorders)
+    tbl.append(tblPr)
+
+    # Grid
+    tblGrid = OxmlElement('w:tblGrid')
+    for w in col_widths:
+        gc = OxmlElement('w:gridCol'); gc.set(qn('w:w'), str(w)); tblGrid.append(gc)
+    tbl.append(tblGrid)
+
+    def make_cell_el(text, width, fill=None, text_color='000000', bold=False, font_size=18):
+        tc = OxmlElement('w:tc')
+        tcPr = OxmlElement('w:tcPr')
+        tcW = OxmlElement('w:tcW'); tcW.set(qn('w:w'), str(width)); tcW.set(qn('w:type'), 'dxa')
+        tcPr.append(tcW)
+        if fill:
+            shd = OxmlElement('w:shd')
+            shd.set(qn('w:val'), 'clear'); shd.set(qn('w:color'), 'auto'); shd.set(qn('w:fill'), fill)
+            tcPr.append(shd)
+        tc.append(tcPr)
+        p = OxmlElement('w:p')
+        pPr = OxmlElement('w:pPr')
+        sp = OxmlElement('w:spacing'); sp.set(qn('w:before'), '40'); sp.set(qn('w:after'), '40')
+        pPr.append(sp); p.append(pPr)
+        r = OxmlElement('w:r')
+        rPr = OxmlElement('w:rPr')
+        if bold:
+            b_el = OxmlElement('w:b'); rPr.append(b_el)
+        clr = OxmlElement('w:color'); clr.set(qn('w:val'), text_color); rPr.append(clr)
+        sz = OxmlElement('w:sz'); sz.set(qn('w:val'), str(font_size)); rPr.append(sz)
+        fn = OxmlElement('w:rFonts'); fn.set(qn('w:ascii'), 'Calibri'); fn.set(qn('w:hAnsi'), 'Calibri'); rPr.append(fn)
+        r.append(rPr)
+        t = OxmlElement('w:t'); t.text = str(text)
+        t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+        r.append(t); p.append(r); tc.append(p)
+        return tc
+
+    # Header row
+    hdr_tr = OxmlElement('w:tr')
+    for i, (h, w) in enumerate(zip(headers, col_widths)):
+        hdr_tr.append(make_cell_el(h, w, fill=header_fill, text_color=header_text_color, bold=True))
+    tbl.append(hdr_tr)
+
+    # Data rows
+    for idx, sf in enumerate(surfaces):
+        qty = sf.get('qty')
+        try: qty_int = int(str(qty)) if qty else 0
+        except: qty_int = 0
+        nm = f"{sf['name']} × {qty_int}" if qty_int > 1 else sf['name']
+        fill = row_fills[idx % 2]
+        pc = sf.get('pc', 2); prc = sf.get('prc', 0)
+        coats_str = f"{pc} / {prc}"
+        vals = [nm, sf.get('paint',''), sf.get('sheen',''), sf.get('color','TBD'), coats_str]
+        tr = OxmlElement('w:tr')
+        for i, (v, w) in enumerate(zip(vals, col_widths)):
+            tr.append(make_cell_el(v, w, fill=fill, bold=(i==0)))
+        tbl.append(tr)
+
+    return tbl
+
 def generate_interior_proposal(E):
     """Generate an interior painting proposal using the exterior template as base."""
     doc = Document(TEMPLATE_PATH)
@@ -1053,36 +1132,26 @@ def generate_interior_proposal(E):
                 break
         body.insert(idx, heading); idx += 1
 
-        # Room paint table — copy from existing table 3 style
-        if len(doc.tables) > 0:
-            # Find a paint table to copy from
-            src_tbl = None
-            for tbl in doc.tables:
-                if len(tbl.rows) > 0 and len(tbl.columns) >= 3:
-                    if tbl.rows[0].cells[0].text.strip() == 'Surface':
-                        src_tbl = tbl
-                        break
-            if src_tbl is not None:
-                tbl_copy = copy.deepcopy(src_tbl._element)
-                from docx.table import Table as DocxTable
-                new_tbl = DocxTable(tbl_copy, doc)
-                # Build surfaces for this room with interior-style data
-                interior_surfaces = []
-                for sf in room.get('surfaces', []):
-                    qty = sf.get('qty', '1')
-                    try: qty_int = int(str(qty))
-                    except: qty_int = 1
-                    interior_surfaces.append({
-                        'name': sf['name'],
-                        'qty': qty_int if qty_int > 1 else None,
-                        'paint': sf.get('paint', ''),
-                        'sheen': sf.get('sheen', ''),
-                        'color': sf.get('color', 'TBD'),
-                        'pc': sf.get('coats', sf.get('pc', 2)),
-                        'prc': sf.get('primerCoats', sf.get('prc', 0))
-                    })
-                rebuild_paint_table(new_tbl, interior_surfaces)
-                body.insert(idx, tbl_copy); idx += 1
+        # Room paint table — build from scratch matching exterior style
+        surfaces = room.get('surfaces', [])
+        if surfaces:
+            interior_surfaces = []
+            for sf in surfaces:
+                qty = sf.get('qty', '1')
+                try: qty_int = int(str(qty))
+                except: qty_int = 1
+                interior_surfaces.append({
+                    'name': sf['name'],
+                    'qty': qty_int if qty_int > 1 else None,
+                    'paint': sf.get('paint', ''),
+                    'sheen': sf.get('sheen', ''),
+                    'color': sf.get('color', 'TBD'),
+                    'pc': sf.get('coats', sf.get('pc', 2)),
+                    'prc': sf.get('primerCoats', sf.get('prc', 0))
+                })
+            # Build table XML from scratch
+            tbl_el = _make_interior_paint_table(interior_surfaces)
+            body.insert(idx, tbl_el); idx += 1
 
         # Room notes
         notes = room.get('notes', '').strip()
