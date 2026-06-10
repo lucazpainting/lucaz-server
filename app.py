@@ -908,6 +908,437 @@ def get_photo_bytes(photo_ref):
             print(f'Photo download error: {e}', flush=True)
         return None
 
+def generate_interior_proposal(E):
+    """Generate an interior painting proposal using the exterior template as base."""
+    doc = Document(TEMPLATE_PATH)
+
+    # 1. Footer page number fix (same as exterior)
+    for sect in doc.sections:
+        ftr = sect.footer
+        for para in ftr.paragraphs:
+            for run in para.runs:
+                if run.text == 'Page':
+                    run.text = 'Page '
+                    parent = run._element.getparent()
+                    idx = list(parent).index(run._element)
+                    for field_el in reversed(_make_page_field(run._element)):
+                        parent.insert(idx + 1, field_el)
+                    break
+
+    # 2. Date formatting
+    raw_date = E.get('dateIssued', '')
+    try:
+        from datetime import datetime
+        for fmt in ('%Y-%m-%d', '%m/%d/%Y', '%m-%d-%Y'):
+            try:
+                parsed = datetime.strptime(raw_date, fmt)
+                formatted_date = parsed.strftime('%m-%d-%Y')
+                break
+            except ValueError:
+                continue
+        else:
+            formatted_date = raw_date
+    except Exception:
+        formatted_date = raw_date
+
+    # 3. Proposal # / Date
+    for para in doc.paragraphs:
+        if 'Proposal #:' in para.text and 'License:' in para.text:
+            for run in para.runs:
+                run.text = run.text.replace('0135', E.get('proposalNum', '____'))
+                run.text = run.text.replace('05/14/2026', formatted_date)
+            break
+
+    # 4. Client info
+    ct = doc.tables[0]
+    addr = f"{E['client']['street']}, {E['client']['city']}, {E['client']['state']} {E['client']['zip']}"
+    set_cell_text(ct.rows[0].cells[1], E.get('subject',''), italic=True)
+    set_cell_text(ct.rows[1].cells[1], E['client']['name'], italic=True)
+    set_cell_text(ct.rows[2].cells[1], addr, italic=True)
+    set_cell_text(ct.rows[3].cells[1], E['client']['phone'], italic=True)
+    set_cell_text(ct.rows[4].cells[1], E['client']['email'], italic=True)
+
+    # 5. Replace Power Wash section with Interior Prep
+    body = doc.element.body
+    prep_items = E.get('interiorPrep', [])
+
+    # Find and replace the Power Wash table (table index 1) heading and content
+    pw_cell = doc.tables[1].rows[0].cells[0]
+    # Update heading
+    for para in pw_cell.paragraphs:
+        if 'Power Washing' in para.text and para.runs:
+            para.runs[0].text = '1.  Interior Preparation'
+            for r in para.runs[1:]: r.text = ''
+            break
+    # Replace bullets with prep items
+    bps = [p for p in pw_cell.paragraphs if p.text.strip() and 'Power Washing' not in p.text and 'Interior Preparation' not in p.text]
+    for i, item in enumerate(prep_items):
+        if i < len(bps) and bps[i].runs:
+            for r in bps[i].runs: r.text = ''
+            bps[i].runs[0].text = item
+    for i in range(len(prep_items), len(bps)):
+        try: bps[i]._element.getparent().remove(bps[i]._element)
+        except: pass
+
+    # 6. Remove Surface Prep table (table index 2) - replace with nothing / hide
+    sp_cell = doc.tables[2].rows[0].cells[0]
+    # Remove the surface prep section entirely
+    tbl2_el = doc.tables[2]._element
+    # Find the heading para for surface prep and remove it along with the table
+    children = list(body)
+    for i, child in enumerate(children):
+        if child.tag.split('}')[-1] == 'p':
+            txt = get_para_text(child, doc)
+            if '2.' in txt and 'Surface Preparation' in txt:
+                try: body.remove(child)
+                except: pass
+                break
+    try: body.remove(tbl2_el)
+    except: pass
+
+    # 7. Remove ALL the exterior side sections (Front, Left, Right, Back and their tables)
+    for sl in ['Front', 'Left', 'Right', 'Back']:
+        remove_side_block(doc, sl)
+
+    # Also remove the carpentry section
+    carp_to_remove = []
+    for child in list(body):
+        if child.tag.split('}')[-1] == 'p' and 'Inspection & Carpentry' in get_para_text(child, doc):
+            carp_to_remove.append(child)
+        elif child.tag.split('}')[-1] == 'tbl':
+            try:
+                from docx.table import Table
+                if 'IMPORTANT' in Table(child, doc).rows[0].cells[0].text:
+                    carp_to_remove.append(child)
+            except: pass
+    for el in carp_to_remove:
+        try: body.remove(el)
+        except: pass
+
+    # 8. Insert room sections
+    rooms_data = E.get('rooms', [])
+
+    # Find insertion point — before PROJECT PHOTOS
+    insert_before_el = None
+    for child in list(body):
+        if child.tag.split('}')[-1] == 'p':
+            txt = get_para_text(child, doc)
+            if 'PROJECT PHOTOS' in txt:
+                insert_before_el = child
+                break
+
+    room_num = 2  # Start at 2 since Interior Prep is 1
+    for room in rooms_data:
+        if insert_before_el is not None:
+            idx = list(body).index(insert_before_el)
+        else:
+            idx = len(list(body))
+
+        # Room heading paragraph — copy style from existing side heading
+        heading = OxmlElement('w:p')
+        for para in doc.paragraphs:
+            if 'of House' in para.text or 'Interior Preparation' in para.text:
+                pPr = para._element.find(qn('w:pPr'))
+                if pPr is not None:
+                    heading.append(copy.deepcopy(pPr))
+                if para.runs:
+                    r = OxmlElement('w:r')
+                    rPr = para.runs[0]._element.find(qn('w:rPr'))
+                    if rPr is not None:
+                        r.append(copy.deepcopy(rPr))
+                    t = OxmlElement('w:t')
+                    t.text = f"{room_num}.  {room['name']}"
+                    t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+                    r.append(t); heading.append(r)
+                break
+        body.insert(idx, heading); idx += 1
+
+        # Room paint table — copy from existing table 3 style
+        if len(doc.tables) > 0:
+            # Find a paint table to copy from
+            src_tbl = None
+            for tbl in doc.tables:
+                if len(tbl.rows) > 0 and len(tbl.columns) >= 3:
+                    if tbl.rows[0].cells[0].text.strip() == 'Surface':
+                        src_tbl = tbl
+                        break
+            if src_tbl is not None:
+                tbl_copy = copy.deepcopy(src_tbl._element)
+                from docx.table import Table as DocxTable
+                new_tbl = DocxTable(tbl_copy, doc)
+                # Build surfaces for this room with interior-style data
+                interior_surfaces = []
+                for sf in room.get('surfaces', []):
+                    qty = sf.get('qty', '1')
+                    try: qty_int = int(str(qty))
+                    except: qty_int = 1
+                    interior_surfaces.append({
+                        'name': sf['name'],
+                        'qty': qty_int if qty_int > 1 else None,
+                        'paint': sf.get('paint', ''),
+                        'sheen': sf.get('sheen', ''),
+                        'color': sf.get('color', 'TBD'),
+                        'pc': sf.get('coats', sf.get('pc', 2)),
+                        'prc': sf.get('primerCoats', sf.get('prc', 0))
+                    })
+                rebuild_paint_table(new_tbl, interior_surfaces)
+                body.insert(idx, tbl_copy); idx += 1
+
+        # Room notes
+        notes = room.get('notes', '').strip()
+        if notes:
+            _insert_note_para(doc, None, notes, body, idx)
+            idx += 1
+
+        # Spacer
+        spacer = OxmlElement('w:p')
+        body.insert(idx, spacer)
+        insert_before_el = spacer
+        room_num += 1
+
+    # 9. Duration
+    duration = E.get('duration', '')
+    if duration:
+        for para in doc.paragraphs:
+            if 'anticipated to take approximately' in para.text and '(X' in para.text:
+                full = para.text.replace('(X\u2013X)', duration).replace('(X-X)', duration)
+                if para.runs:
+                    para.runs[0].text = full
+                    for r in para.runs[1:]: r.text = ''
+                break
+
+    # 10. Cost table (same as exterior)
+    is_cash = E.get('cashPayment', False)
+    payment_type = E.get('paymentType', 'thirds')
+    tax_pct = E.get('salesTaxPct', '8.375%')
+
+    for tbl in doc.tables:
+        rows_to_remove = []
+        for row in tbl.rows:
+            if len(row.cells) < 2: continue
+            cell0 = row.cells[0].text.strip()
+            if 'Sales Tax' in cell0:
+                if is_cash:
+                    rows_to_remove.append(row)
+                else:
+                    set_cell_text(row.cells[0], f'Sales Tax ({tax_pct})', italic=False)
+                    set_cell_text(row.cells[1], E.get('salesTaxAmt',''))
+                continue
+            if 'Deposit Due' in cell0 or ('Deposit' in cell0 and 'Due' in cell0):
+                lbl = 'Deposit Due (1/3)' if payment_type == 'thirds' else 'Deposit Due (1/2)'
+                set_cell_text(row.cells[0], lbl, bold=True)
+                set_cell_text(row.cells[1], E.get('deposit',''))
+                continue
+            if 'Balance Due' in cell0:
+                set_cell_text(row.cells[0], 'Remaining Balance Due', bold=True)
+                set_cell_text(row.cells[1], E.get('balance',''))
+                continue
+            if 'Subtotal' in cell0 and is_cash:
+                rows_to_remove.append(row)
+                continue
+            cost_map = {
+                'Subtotal': E.get('subtotal',''),
+                'Total Cost for Project': E.get('total',''),
+                'Porta Potty': E.get('portaPottyAmt','$200.00'),
+            }
+            for key, val in cost_map.items():
+                if val and key in cell0:
+                    set_cell_text(row.cells[1], val)
+                    break
+        for row in rows_to_remove:
+            try: row._element.getparent().remove(row._element)
+            except: pass
+
+    # Cash note
+    if is_cash:
+        for tbl in doc.tables:
+            for row in tbl.rows:
+                if 'Total Cost for Project' in row.cells[0].text:
+                    cash_para = OxmlElement('w:p')
+                    pPr = OxmlElement('w:pPr')
+                    sp = OxmlElement('w:spacing'); sp.set(qn('w:before'),'80'); sp.set(qn('w:after'),'0')
+                    pPr.append(sp); cash_para.append(pPr)
+                    r = OxmlElement('w:r')
+                    rPr = OxmlElement('w:rPr')
+                    b = OxmlElement('w:b')
+                    clr = OxmlElement('w:color'); clr.set(qn('w:val'), '2d8a4e')
+                    sz = OxmlElement('w:sz'); sz.set(qn('w:val'), '20')
+                    rPr.append(b); rPr.append(clr); rPr.append(sz); r.append(rPr)
+                    t = OxmlElement('w:t'); t.text = '✓ Client paying cash'
+                    t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+                    r.append(t); cash_para.append(r)
+                    tbl._element.addnext(cash_para)
+                    break
+
+    # 11. Payment terms
+    for para in doc.paragraphs:
+        txt = para.text.strip()
+        if txt == '1/3 deposit due at contract signing':
+            if payment_type == 'half':
+                for run in para.runs: run.text = ''
+                if para.runs: para.runs[0].text = '50% deposit due at contract signing'
+        elif txt == '1/3 due at 50% project completion':
+            if payment_type == 'half':
+                p_el = para._element
+                p_el.getparent().remove(p_el)
+        elif txt == '1/3 final payment due upon completion':
+            if payment_type == 'half':
+                for run in para.runs: run.text = ''
+                if para.runs: para.runs[0].text = '50% balance due upon completion'
+
+    # 12. Photos
+    import base64
+    from docx.shared import Inches
+    photos = E.get('photos', {})
+    photo_labels = E.get('photoLabels', {})
+
+    active_photos = []
+    for room in rooms_data:
+        key = f"room_{room['name']}"
+        pd = photos.get(key)
+        lbl = photo_labels.get(key) or room['name']
+        if pd and (pd.startswith('data:image') or (len(pd) < 100 and not pd.startswith('data:'))):
+            active_photos.append((key, lbl, pd))
+    # Additional photos
+    room_keys = {f"room_{r['name']}" for r in rooms_data}
+    for slot_key, pd in photos.items():
+        if slot_key in room_keys: continue
+        if not pd: continue
+        if pd.startswith('data:image') or (len(pd) < 100 and not pd.startswith('data:')):
+            lbl = photo_labels.get(slot_key) or slot_key.replace('_',' ').title()
+            active_photos.append((slot_key, lbl, pd))
+
+    # Remove existing photo tables
+    photo_tbls = []
+    for tbl in doc.tables:
+        if any(any('[ Insert Photo Here ]' in p.text for p in cell.paragraphs)
+               for row in tbl.rows for cell in row.cells):
+            photo_tbls.append(tbl)
+
+    insert_before_el = None
+    for child in list(body):
+        if child.tag.split('}')[-1] == 'p':
+            txt = get_para_text(child, doc)
+            if 'PROJECT INFORMATION' in txt:
+                insert_before_el = child
+                break
+
+    for tbl in photo_tbls:
+        try: body.remove(tbl._element)
+        except: pass
+
+    if not active_photos:
+        children = list(body)
+        for i, child in enumerate(children):
+            if child.tag.split('}')[-1] == 'p' and 'PROJECT PHOTOS' in get_para_text(child, doc):
+                to_rm = [child]
+                j = i + 1
+                while j < len(children) and len(to_rm) < 4:
+                    nc = children[j]
+                    nc_txt = get_para_text(nc, doc) if nc.tag.split('}')[-1] == 'p' else ''
+                    if nc_txt and any(x in nc_txt for x in ['PROJECT INFORMATION','WARRANTY','PAYMENT']):
+                        break
+                    to_rm.append(nc)
+                    j += 1
+                for el in to_rm:
+                    try: body.remove(el)
+                    except: pass
+                break
+    else:
+        W = 9360
+        rows = [active_photos[i:i+3] for i in range(0, len(active_photos), 3)]
+
+        def make_cell(width, key, lbl, pd, doc_ref):
+            tc = OxmlElement('w:tc')
+            tcPr = OxmlElement('w:tcPr')
+            tcW = OxmlElement('w:tcW')
+            tcW.set(qn('w:w'), str(width)); tcW.set(qn('w:type'), 'dxa')
+            tcPr.append(tcW)
+            tcBorders = OxmlElement('w:tcBorders')
+            for side in ['top','left','bottom','right']:
+                b = OxmlElement(f'w:{side}')
+                b.set(qn('w:val'), 'single'); b.set(qn('w:sz'), '4'); b.set(qn('w:color'), 'CCCCCC')
+                tcBorders.append(b)
+            tcPr.append(tcBorders); tc.append(tcPr)
+            tmp = doc_ref.add_paragraph()
+            tmp.alignment = 1
+            if pd:
+                try:
+                    img_bytes = get_photo_bytes(pd)
+                    if img_bytes:
+                        run = tmp.add_run()
+                        run.add_picture(io.BytesIO(img_bytes), width=Inches(min(2.3, width/1440.0)))
+                except Exception as e:
+                    print(f'Photo error: {e}', flush=True)
+            pPr = tmp._element.find(qn('w:pPr'))
+            if pPr is None:
+                pPr = OxmlElement('w:pPr'); tmp._element.insert(0, pPr)
+            sp = OxmlElement('w:spacing'); sp.set(qn('w:before'), '60'); sp.set(qn('w:after'), '40')
+            pPr.append(sp)
+            jc = OxmlElement('w:jc'); jc.set(qn('w:val'), 'center'); pPr.append(jc)
+            p1 = tmp._element
+            p1.getparent().remove(p1)
+            tc.append(p1)
+            p2 = OxmlElement('w:p')
+            pPr2 = OxmlElement('w:pPr')
+            jc2 = OxmlElement('w:jc'); jc2.set(qn('w:val'), 'center')
+            sp2 = OxmlElement('w:spacing'); sp2.set(qn('w:before'), '0'); sp2.set(qn('w:after'), '60')
+            pPr2.append(jc2); pPr2.append(sp2); p2.append(pPr2)
+            r2 = OxmlElement('w:r')
+            rPr2 = OxmlElement('w:rPr')
+            b2 = OxmlElement('w:b')
+            fn2 = OxmlElement('w:rFonts'); fn2.set(qn('w:ascii'), 'Calibri')
+            rPr2.append(b2); rPr2.append(fn2); r2.append(rPr2)
+            t2 = OxmlElement('w:t'); t2.text = lbl
+            t2.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+            r2.append(t2); p2.append(r2); tc.append(p2)
+            return tc
+
+        def make_table(row_photos, doc_ref):
+            n = len(row_photos); col_w = W // n
+            tbl = OxmlElement('w:tbl')
+            tblPr = OxmlElement('w:tblPr')
+            tblW = OxmlElement('w:tblW'); tblW.set(qn('w:w'), str(W)); tblW.set(qn('w:type'), 'dxa')
+            tblPr.append(tblW); tbl.append(tblPr)
+            tblGrid = OxmlElement('w:tblGrid')
+            for _ in row_photos:
+                gc = OxmlElement('w:gridCol'); gc.set(qn('w:w'), str(col_w)); tblGrid.append(gc)
+            tbl.append(tblGrid)
+            tr = OxmlElement('w:tr')
+            for k, l, pd in row_photos:
+                tr.append(make_cell(col_w, k, l, pd, doc_ref))
+            tbl.append(tr)
+            return tbl
+
+        if insert_before_el is not None:
+            idx = list(body).index(insert_before_el)
+        else:
+            idx = len(list(body))
+
+        spacer = OxmlElement('w:p')
+        sp_pPr = OxmlElement('w:pPr')
+        sp_sp = OxmlElement('w:spacing'); sp_sp.set(qn('w:before'), '80'); sp_sp.set(qn('w:after'), '0')
+        sp_pPr.append(sp_sp); spacer.append(sp_pPr)
+
+        for ri, row_photos in enumerate(rows):
+            body.insert(idx, make_table(row_photos, doc))
+            idx += 1
+            if ri < len(rows) - 1:
+                body.insert(idx, copy.deepcopy(spacer)); idx += 1
+
+    # 13. Remove Porta Potty row
+    if not E.get('portaPotty', False):
+        for tbl in doc.tables:
+            for row in list(tbl.rows):
+                if 'Porta Potty' in row.cells[0].text:
+                    row._element.getparent().remove(row._element)
+                    break
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf
+
 # ── ROUTES ──
 @app.route('/generate', methods=['POST', 'OPTIONS'])
 def generate():
@@ -917,7 +1348,11 @@ def generate():
         E = flask_request.get_json()
         if not E:
             return jsonify({'error': 'No data'}), 400
-        buf = generate_proposal(E)
+        # Route to interior or exterior generator
+        if E.get('projectType') == 'interior':
+            buf = generate_interior_proposal(E)
+        else:
+            buf = generate_proposal(E)
         doc_bytes = buf.read()
         client_name = E.get('client', {}).get('name', 'Client')
         client_safe = client_name.replace(' ', '_')
