@@ -328,7 +328,7 @@ def rebuild_paint_table(tbl, surfaces):
                     b = rpr.find(qn('w:b'))
                     if b is not None: rpr.remove(b)
         tbl._element.append(new_row)
-        vals = [nm, sf.get('paint',''), sf.get('sheen',''), sf.get('color','TBD'), f"{sf.get('pc',2)} / {sf.get('prc',0)}"]
+        vals = [nm, sf.get('paint',''), sf.get('sheen',''), sf.get('color','') or 'TBD', f"{sf.get('pc',2)} / {sf.get('prc',0)}"]
         for ci, val in enumerate(vals):
             set_row_cell_text(new_row, ci, val, bold=(ci==0))
 
@@ -979,7 +979,8 @@ def _make_interior_paint_table(surfaces):
         fill = row_fills[idx % 2]
         pc = sf.get('pc', 2); prc = sf.get('prc', 0)
         coats_str = f"{pc} / {prc}"
-        vals = [nm, sf.get('paint',''), sf.get('sheen',''), sf.get('color','TBD'), coats_str]
+        color_val = sf.get('color','') or 'TBD'
+        vals = [nm, sf.get('paint',''), sf.get('sheen',''), color_val, coats_str]
         tr = OxmlElement('w:tr')
         for i, (v, w) in enumerate(zip(vals, col_widths)):
             tr.append(make_cell_el(v, w, fill=fill, bold=(i==0)))
