@@ -1049,12 +1049,28 @@ def generate_interior_proposal(E):
             para.runs[0].text = '1.  Interior Preparation'
             for r in para.runs[1:]: r.text = ''
             break
-    # Replace bullets with prep items
+    # Replace bullets with prep items — add new paragraphs if more items than slots
     bps = [p for p in pw_cell.paragraphs if p.text.strip() and 'Power Washing' not in p.text and 'Interior Preparation' not in p.text]
+    # Fill existing slots
     for i, item in enumerate(prep_items):
-        if i < len(bps) and bps[i].runs:
-            for r in bps[i].runs: r.text = ''
-            bps[i].runs[0].text = item
+        if i < len(bps):
+            if bps[i].runs:
+                for r in bps[i].runs: r.text = ''
+                bps[i].runs[0].text = item
+        else:
+            # Add new bullet paragraph copying style from last existing bullet
+            import copy as _copy
+            template_bp = bps[-1] if bps else pw_cell.paragraphs[-1]
+            new_p = _copy.deepcopy(template_bp._element)
+            # Clear existing runs and set new text
+            from docx.oxml.ns import qn as _qn
+            for r_el in new_p.findall('.//' + _qn('w:r')):
+                t_el = r_el.find(_qn('w:t'))
+                if t_el is not None:
+                    t_el.text = item
+                    break
+            pw_cell._tc.append(new_p)
+    # Remove leftover empty slots
     for i in range(len(prep_items), len(bps)):
         try: bps[i]._element.getparent().remove(bps[i]._element)
         except: pass
@@ -1113,23 +1129,22 @@ def generate_interior_proposal(E):
         else:
             idx = len(list(body))
 
-        # Room heading paragraph — copy style from existing side heading
+        # Room heading paragraph — build from scratch with correct red styling
         heading = OxmlElement('w:p')
-        for para in doc.paragraphs:
-            if 'of House' in para.text or 'Interior Preparation' in para.text:
-                pPr = para._element.find(qn('w:pPr'))
-                if pPr is not None:
-                    heading.append(copy.deepcopy(pPr))
-                if para.runs:
-                    r = OxmlElement('w:r')
-                    rPr = para.runs[0]._element.find(qn('w:rPr'))
-                    if rPr is not None:
-                        r.append(copy.deepcopy(rPr))
-                    t = OxmlElement('w:t')
-                    t.text = f"{room_num}.  {room['name']}"
-                    t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
-                    r.append(t); heading.append(r)
-                break
+        pPr = OxmlElement('w:pPr')
+        sp = OxmlElement('w:spacing'); sp.set(qn('w:before'), '160'); sp.set(qn('w:after'), '80')
+        pPr.append(sp); heading.append(pPr)
+        r = OxmlElement('w:r')
+        rPr = OxmlElement('w:rPr')
+        b_el = OxmlElement('w:b'); rPr.append(b_el)
+        clr = OxmlElement('w:color'); clr.set(qn('w:val'), '9A191A'); rPr.append(clr)
+        sz = OxmlElement('w:sz'); sz.set(qn('w:val'), '22'); rPr.append(sz)
+        fn = OxmlElement('w:rFonts'); fn.set(qn('w:ascii'), 'Calibri'); fn.set(qn('w:hAnsi'), 'Calibri'); rPr.append(fn)
+        r.append(rPr)
+        t = OxmlElement('w:t')
+        t.text = f"{room_num}.  {room['name']}"
+        t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+        r.append(t); heading.append(r)
         body.insert(idx, heading); idx += 1
 
         # Room paint table — build from scratch matching exterior style
